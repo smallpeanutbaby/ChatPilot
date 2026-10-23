@@ -248,10 +248,11 @@ public sealed class CommandExecutorTests : IAsyncDisposable
         await Task.Delay(300);
         Assert.Empty(_herdr.CallsStartingWith("agent", "prompt"));
 
+        // 和真实情况一样：发 /yes 时它还卡在确认框上，按键之后才回到空闲。
         var butler = _herdr.Find("butler");
         Assert.NotNull(butler);
-        butler.Status = "idle";
         Assert.True((await _executor.ExecuteAsync(new RespondCommand(butler.PaneId, true), CancellationToken.None)).Ok);
+        butler.Status = "idle";
 
         var ev = await _events.WaitAsync();
         Assert.Equal(AgentEventKind.Completed, ev.Kind);
@@ -299,6 +300,30 @@ public sealed class CommandExecutorTests : IAsyncDisposable
         Assert.Equal(AgentEventKind.Failed, ev.Kind);
         Assert.Contains("没看到它开始工作", ev.Text, StringComparison.Ordinal);
         Assert.True(_herdr.CallsStartingWith("agent", "prompt").Count == 1, reason);
+    }
+
+    [Fact]
+    public async Task Agent_that_wakes_up_before_the_resend_is_not_prompted_twice()
+    {
+        // 审查发现：判断"被吞"之后要等一会儿才重发，这期间 agent 可能把排队的输入吃进去开始干活了。
+        var agent = _herdr.AddAgent("pi", "demo", kind: "pi");
+        _herdr.Screen = SampleScreens.PiReply;
+        _herdr.SwallowPrompts = 1;
+        _herdr.AfterRead = a =>
+        {
+            _herdr.AfterRead = null;
+            a.Status = "working";
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(200);
+                a.Status = "idle";
+            });
+        };
+        Assert.True((await _executor.ExecuteAsync(new PromptCommand(agent.PaneId, "列出当前目录的文件"), CancellationToken.None)).Ok);
+
+        var ev = await _events.WaitAsync();
+        Assert.Equal(AgentEventKind.Completed, ev.Kind);
+        Assert.Single(_herdr.CallsStartingWith("agent", "prompt"));
     }
 
     [Fact]
@@ -359,6 +384,19 @@ public sealed class CommandExecutorTests : IAsyncDisposable
         var reject = await _executor.ExecuteAsync(new RespondCommand(agent.PaneId, false), CancellationToken.None);
         Assert.True(reject.Ok);
         Assert.Contains(_herdr.CallsStartingWith("agent", "send-keys"), c => c[^1] == "esc" && c.Length == 4);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Yes_and_no_press_nothing_unless_the_agent_is_waiting_for_confirmation(bool approve)
+    {
+        // 审查发现：迟到的 /yes 会把回车按进输入框，迟到的 /no 会用 Esc 打断正在干的活。
+        var agent = _herdr.AddAgent("tideq", "TideQ", "working");
+        _herdr.Screen = SampleScreens.TrustDialog;
+        var outcome = await _executor.ExecuteAsync(new RespondCommand(agent.PaneId, approve), CancellationToken.None);
+        Assert.Contains("没在等确认", outcome.Error?.Message, StringComparison.Ordinal);
+        Assert.Empty(_herdr.CallsStartingWith("agent", "send-keys"));
     }
 
     [Fact]

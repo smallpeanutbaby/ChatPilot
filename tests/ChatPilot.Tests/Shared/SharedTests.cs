@@ -92,6 +92,10 @@ public class ValidationTests
     [Theory]
     [InlineData("w1:p2", true)]
     [InlineData("w12:p345", true)]
+    [InlineData("w2:pF", true)]
+    [InlineData("wA:pA", true)]
+    [InlineData("w2:p-1", false)]
+    [InlineData("w2:p_1", false)]
     [InlineData("w1:p", false)]
     [InlineData("w1:p2;id", false)]
     public void Pane_ids_are_strict(string id, bool valid) => Assert.Equal(valid, Validation.IsPaneId(id));

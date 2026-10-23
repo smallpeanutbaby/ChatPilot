@@ -310,8 +310,36 @@ public sealed class PromptTracker : IAsyncDisposable
             return (null, false);
         }
 
-        _logger.LogWarning("提交给 {Agent} 的指令没有被接收（屏幕上找不到），重发一次", before.Name ?? before.PaneId);
+        // 等界面准备好再重发。等待期间 agent 可能已经把排队的输入吃进去开始干活了，所以重发前必须再确认一次，
+        // 把"判断被吞"到"重发"之间的空窗缩到最小。
         await Task.Delay(_initialPromptGrace, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var latest = await _herdr.TryGetAgentAsync(before.PaneId, cancellationToken).ConfigureAwait(false);
+            if (latest is null || HasStarted(before, latest))
+            {
+                return (latest, false);
+            }
+
+            if (!latest.IsReady)
+            {
+                return (null, false);
+            }
+
+            screen = await _herdr.ReadAsync(before.PaneId, "recent-unwrapped", DropCheckLines, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HerdrException ex)
+        {
+            _logger.LogDebug("重发前检查 {Agent} 时出错：{Message}", before.Name ?? before.PaneId, ex.Message);
+            return (null, false);
+        }
+
+        if (ReplyExtractor.MayShowPrompt(screen, prompt))
+        {
+            return (null, false);
+        }
+
+        _logger.LogWarning("提交给 {Agent} 的指令没有被接收（屏幕上找不到），重发一次", before.Name ?? before.PaneId);
         await _herdr.PromptAsync(before.PaneId, prompt, cancellationToken).ConfigureAwait(false);
         return (await WaitForActivityAsync(before, cancellationToken).ConfigureAwait(false), true);
     }

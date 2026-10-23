@@ -48,7 +48,8 @@ public static partial class Validation
     [GeneratedRegex(@"^[a-z][a-z0-9_-]{0,31}\z", RegexOptions.CultureInvariant)]
     private static partial Regex AgentNameRegex();
 
-    [GeneratedRegex(@"^w[0-9]{1,9}:p[0-9]{1,9}\z", RegexOptions.CultureInvariant)]
+    /// <summary>herdr 的工作区和 pane 编号不只是数字：超过 9 个之后会用字母，例如 <c>wA:pF</c>。</summary>
+    [GeneratedRegex(@"^w[0-9A-Za-z]{1,9}:p[0-9A-Za-z]{1,9}\z", RegexOptions.CultureInvariant)]
     private static partial Regex PaneIdRegex();
 
     [GeneratedRegex(@"^[\p{L}\p{N}][\p{L}\p{N}_-]{0,31}\z", RegexOptions.CultureInvariant)]

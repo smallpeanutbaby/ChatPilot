@@ -10,6 +10,7 @@ namespace ChatPilot.Node.Execution;
 /// <item>选中标记因 agent 而异：Claude Code / Gemini / Qwen 的 <c>❯</c>，Codex 的 <c>›</c>，Cursor 的 <c>→</c>，
 /// Kimi 的 <c>▶</c>，Hermes 的 <c>▸</c>，Droid 的 <c>&gt;</c>，Gemini 旧版的 <c>●</c>，以及 Grok 的单选框 <c>(●)</c>。</item>
 /// <item>不能简单地按回车：Claude 的"信任此目录"确认框默认选中的是"No, exit"。</item>
+/// <item>只有选项里同时有"同意"类和"拒绝 / 取消"类，才当作确认框：agent 回复里的编号列表、回显的多行指令不会被误认。</item>
 /// <item>只做"这一次同意"：优先选纯粹的 Yes / Allow，其次是"仅这一次"，再其次是其他同意类选项；
 /// 带"不再询问 / 全部允许 / 本会话都允许 / 自动执行"等会扩大权限的选项一律不自动选。只剩这类选项时拒绝，让用户用 /keys 自己决定。</item>
 /// <item>横排按钮（opencode 的 Allow once / Allow always / Reject）在纯文本里看不出哪个被选中，不自动处理。</item>
@@ -58,7 +59,7 @@ public static partial class ApprovalNavigator
 
             sawCursor = true;
             var found = ReadOptions(lines, i, column);
-            if (found.Count >= 2)
+            if (found.Count >= 2 && found.Any(o => DeclineRegex().IsMatch(StripNumber(o.Text))))
             {
                 options = found;
                 cursor = i;
@@ -67,7 +68,9 @@ public static partial class ApprovalNavigator
 
         if (options is null)
         {
-            error = sawCursor ? "屏幕上没有找到确认框的选项" : "屏幕上没有找到确认框";
+            error = sawCursor
+                ? "屏幕上没有找到确认框（要同时有\"同意\"和\"拒绝 / 取消\"两类选项才算）。确实有确认框的话，请用 /keys 手动操作"
+                : "屏幕上没有找到确认框";
             return false;
         }
 
@@ -222,9 +225,16 @@ public static partial class ApprovalNavigator
     [GeneratedRegex(@"^(\d+[.)]\s*)?(yes|allow|approve|accept|trust|continue|proceed|run|是|允许|同意|信任|批准|继续|执行|运行)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ApproveRegex();
 
-    /// <summary>会扩大权限的选项：以后不再询问、全部允许、整个会话 / 工作区都允许、自动执行、加白名单、跳过权限检查等。</summary>
-    [GeneratedRegex(@"don'?t ask|do not ask|always|\ball\b|auto|bypass|skip|every|remember|session|workspace|allowlist|whitelist|yolo|不再|始终|总是|全部|所有|自动|跳过|会话|工作区|白名单", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    /// <summary>
+    /// 会扩大权限的选项：以后不再询问、全部允许、整个会话 / 工作区 / 项目都允许、永久或全局生效、自动执行、加白名单、跳过权限检查等。
+    /// 这是黑名单，新 agent 的新措辞可能漏掉，所以宁可多拦：拦错了只是让用户用 /keys 自己选。
+    /// </summary>
+    [GeneratedRegex(@"don'?t ask|do not ask|always|\ball\b|auto|bypass|skip|every|remember|session|workspace|project|permanent|global|forever|future|persist|allowlist|whitelist|yolo|不再|始终|总是|全部|所有|自动|跳过|会话|工作区|项目|永久|全局|以后|今后|永远|白名单", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex EscalatingRegex();
+
+    /// <summary>拒绝 / 取消类的选项：No、Deny、Reject、Cancel、Skip、Exit、Keep（不删除）、否、拒绝、取消、跳过、退出。</summary>
+    [GeneratedRegex(@"^(?:no|deny|reject|decline|cancel|skip|exit|quit|keep)\b|^(?:否|拒绝|取消|跳过|退出|不同意|不允许)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex DeclineRegex();
 
     [GeneratedRegex(@"^(yes|allow|approve|accept|是|允许|同意|批准)[.。!！]?\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex PlainYesRegex();

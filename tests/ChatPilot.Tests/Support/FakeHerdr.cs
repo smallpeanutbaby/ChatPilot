@@ -75,6 +75,9 @@ internal sealed class FakeHerdr : IProcessRunner
     /// <summary>吞掉接下来这么多次提交（返回成功但 agent 没反应），模拟 Claude 界面还没准备好。</summary>
     public int SwallowPrompts { get; set; }
 
+    /// <summary>每次 agent read 之后调用（模拟读屏之后 agent 的状态才变化）。</summary>
+    public Action<Agent>? AfterRead { get; set; }
+
     /// <summary>所有命令额外等待的时间（模拟节点很慢）。</summary>
     public TimeSpan CommandDelay { get; set; } = TimeSpan.Zero;
 
@@ -134,7 +137,13 @@ internal sealed class FakeHerdr : IProcessRunner
                     return Error(readError, "simulated " + readError);
                 }
 
-                return Find(a[2]) is null ? NotFound(a[2]) : new ProcessResult(0, Screen, "");
+                if (Find(a[2]) is not { } readAgent)
+                {
+                    return NotFound(a[2]);
+                }
+
+                AfterRead?.Invoke(readAgent);
+                return new ProcessResult(0, Screen, "");
 
             case "agent prompt":
             {

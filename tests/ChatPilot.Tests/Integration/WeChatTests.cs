@@ -193,6 +193,9 @@ public sealed class WeChatChannelTests : IDisposable
             Assert.Equal("ctx-owner", msg.GetProperty("context_token").GetString());
             Assert.Equal(2, msg.GetProperty("message_type").GetInt32());
             Assert.Contains("ChatPilot 指令", msg.GetProperty("item_list")[0].GetProperty("text_item").GetProperty("text").GetString(), StringComparison.Ordinal);
+
+            // 真机发现：中文和标点转义成 \uXXXX 发出去，微信里的消息会在中文引号处被截断。要和腾讯官方插件一样原样发 UTF-8。
+            Assert.Contains("ChatPilot 指令", sent.Body, StringComparison.Ordinal);
             Assert.Equal("Bearer bot-token", sent.Headers["Authorization"]);
             Assert.StartsWith("ChatPilot/", sent.Json.GetProperty("base_info").GetProperty("bot_agent").GetString(), StringComparison.Ordinal);
 

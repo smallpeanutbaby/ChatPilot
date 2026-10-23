@@ -233,3 +233,15 @@ public class ReplyFormatterTests
         Assert.Contains("/no mac/tideq", text, StringComparison.Ordinal);
     }
 }
+
+/// <summary>发给 iLink 的 JSON 格式。</summary>
+public class ILinkJsonTests
+{
+    [Fact]
+    public void Chinese_text_and_curly_quotes_are_written_as_is()
+    {
+        // 真机发现：转义成 “ 的中文引号会让微信里的消息在那里被截断；腾讯官方插件用 JSON.stringify，原样发 UTF-8。
+        var json = System.Text.Json.JsonSerializer.Serialize(new { text = "我把你的“修改”理解为……" }, ILinkConstants.Json);
+        Assert.Equal("{\"text\":\"我把你的“修改”理解为……\"}", json);
+    }
+}

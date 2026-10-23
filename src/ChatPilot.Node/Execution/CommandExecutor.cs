@@ -315,13 +315,21 @@ public sealed class CommandExecutor(
             return invalid;
         }
 
+        // 只在 agent 确实停在确认框时按键：迟到的 /yes 可能把回车按进输入框，迟到的 /no 会用 Esc 打断正在干的活。
+        var agent = await herdr.GetAgentAsync(command.Target, cancellationToken).ConfigureAwait(false);
+        if (agent.Status != AgentStatus.Blocked)
+        {
+            return CommandOutcome.Failure(
+                ErrorCodes.InvalidArgument,
+                $"它现在没在等确认（{agent.Status}），没有按任何键。确认框还在屏幕上的话，请用 /keys 手动操作");
+        }
+
         if (!command.Approve)
         {
-            await herdr.SendKeysAsync(command.Target, ["esc"], cancellationToken).ConfigureAwait(false);
+            await herdr.SendKeysAsync(agent.PaneId, ["esc"], cancellationToken).ConfigureAwait(false);
             return CommandOutcome.Success(new AckData("已按 Esc（拒绝 / 取消）"));
         }
 
-        var agent = await herdr.GetAgentAsync(command.Target, cancellationToken).ConfigureAwait(false);
         var screen = await herdr.ReadAsync(agent.PaneId, "visible", 80, cancellationToken).ConfigureAwait(false);
         if (!ApprovalNavigator.TryPlanApprove(screen, out var plan, out var error) || plan is null)
         {

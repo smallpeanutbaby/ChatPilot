@@ -25,6 +25,9 @@ public static class OpenCodeStore
     /// <summary>最多往回看多少条消息（一轮里每次工具调用都是一条 assistant 消息）。</summary>
     private const int MaxMessages = 500;
 
+    /// <summary>库被 agent 锁住时每条语句最多等几秒。</summary>
+    private const int BusyTimeoutSeconds = 3;
+
     /// <summary>这个数据库里有没有这个会话。打不开或不是 opencode 的库时返回 false。</summary>
     public static bool HasSession(string databasePath, string sessionId)
     {
@@ -67,16 +70,15 @@ public static class OpenCodeStore
     private static SqliteConnection Open(string databasePath)
     {
         // 不进连接池：用完立刻释放文件句柄，不影响 agent 自己写库。
+        // 库被锁时每条语句最多等 3 秒（Microsoft.Data.Sqlite 按命令超时自己重试，默认 30 秒，PRAGMA busy_timeout 管不住）。
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
             DataSource = databasePath,
             Mode = SqliteOpenMode.ReadOnly,
             Pooling = false,
+            DefaultTimeout = BusyTimeoutSeconds,
         }.ToString());
         connection.Open();
-        using var busy = connection.CreateCommand();
-        busy.CommandText = "PRAGMA busy_timeout = 3000";
-        busy.ExecuteNonQuery();
         return connection;
     }
 

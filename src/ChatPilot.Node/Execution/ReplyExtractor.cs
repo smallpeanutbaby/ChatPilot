@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.RegularExpressions;
 using ChatPilot.Shared.Text;
 
@@ -117,8 +118,13 @@ public static partial class ReplyExtractor
         return Compact(screen).Contains(snippet, StringComparison.Ordinal);
     }
 
-    /// <summary>去掉空白和边框竖线。</summary>
-    private static string Compact(string text) => string.Concat(text.Where(c => !char.IsWhiteSpace(c) && c is not ('│' or '┃')));
+    /// <summary>
+    /// 去掉空白、边框竖线，以及终端回读时常丢掉的格式字符和组合符号（emoji 变体选择符 U+FE0F、连接符 U+200D 等），
+    /// 免得同一段文字因为这些看不见的字符被判成"不在屏幕上"。
+    /// </summary>
+    private static string Compact(string text) =>
+        string.Concat(text.Where(c => !char.IsWhiteSpace(c) && c is not ('│' or '┃')
+            && CharUnicodeInfo.GetUnicodeCategory(c) is not (UnicodeCategory.Format or UnicodeCategory.NonSpacingMark or UnicodeCategory.EnclosingMark)));
 
     /// <summary>按行拆分（兼容 CRLF），并去掉每行末尾的空白。</summary>
     internal static List<string> SplitLines(string text) =>
@@ -166,7 +172,9 @@ public static partial class ReplyExtractor
                 return i;
             }
 
-            if (lines[i].TrimStart().StartsWith('╭') && i + 1 <= last && BoxedPromptRegex().IsMatch(lines[i + 1]))
+            // 只有屏幕上最后一个圆角框才可能是输入框：确认框挡住输入框时，上方回显指令的框也长这样，不能把下面的确认框截掉。
+            if (lines[i].TrimStart().StartsWith('╭') && i + 1 <= last && BoxedPromptRegex().IsMatch(lines[i + 1])
+                && !lines.Skip(i + 2).Take(last - i - 1).Any(l => l.TrimStart().StartsWith('╭') || LooksLikeOption(WithoutBoxEdge(l))))
             {
                 return i;
             }
@@ -182,6 +190,16 @@ public static partial class ReplyExtractor
 
         return lines.Count;
     }
+
+    /// <summary>圆角框的上下边：<c>╭────╮</c>、<c>╰────╯</c>。</summary>
+    private static bool IsBoxBorder(string line)
+    {
+        var trimmed = line.Trim();
+        return trimmed.Length >= 3 && trimmed[0] is '╭' or '╰' && trimmed[^1] is '╮' or '╯' && trimmed[1..^1].All(c => c == '─');
+    }
+
+    /// <summary>去掉行首的边框竖线（确认框常画在框里），再判断是不是选项。</summary>
+    private static string WithoutBoxEdge(string line) => line.TrimStart().TrimStart('│', '┃');
 
     /// <summary>像选项列表里的一行：编号开头，或者以选中标记开头。</summary>
     private static bool LooksLikeOption(string line)
@@ -342,7 +360,8 @@ public static partial class ReplyExtractor
     /// 缩进很深的行是靠右显示的状态提示（例如"✔ Update installed"），回复正文只缩进 2 格。
     /// </summary>
     private static bool IsChrome(string line) =>
-        (line.Length > 1 && SpinnerGlyphs.Contains(line[0]) && line[1] == ' ')
+        IsBoxBorder(line)
+        || (line.Length > 1 && SpinnerGlyphs.Contains(line[0]) && line[1] == ' ')
         || (line.TrimStart() is { Length: > 0 } trimmed && trimmed[0] is >= '⠀' and <= '⣿')
         || line.TrimStart().StartsWith("⎿  Tip:", StringComparison.Ordinal)
         || (line.Length - line.TrimStart().Length >= RightAlignedIndent)

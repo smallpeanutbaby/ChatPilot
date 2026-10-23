@@ -326,6 +326,24 @@ public sealed class OpenCodeStoreTests : IDisposable
     }
 
     [Fact]
+    public void Locked_database_gives_up_within_a_few_seconds()
+    {
+        // 审查发现：PRAGMA busy_timeout 不生效，库被锁时每条语句要等 30 秒。
+        Session("ses_a");
+        using var locker = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_database};Pooling=False");
+        locker.Open();
+        using (var begin = locker.CreateCommand())
+        {
+            begin.CommandText = "BEGIN EXCLUSIVE";
+            begin.ExecuteNonQuery();
+        }
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        Assert.False(OpenCodeStore.HasSession(_database, "ses_a"));
+        Assert.InRange(watch.Elapsed.TotalSeconds, 0, 10);
+    }
+
+    [Fact]
     public void Unreadable_databases_return_null()
     {
         var notDb = _temp.Combine("broken.db");

@@ -115,6 +115,45 @@ public class ReplyExtractorTests
         Assert.Equal(expected, ReplyExtractor.MayShowPrompt(SampleScreens.PiReply, prompt));
 
     [Fact]
+    public void Blocked_gemini_screen_keeps_the_dialog_below_the_echoed_prompt_box()
+    {
+        // 审查发现：确认框挡住输入框时，上方回显指令的框被当成输入框，确认框被截掉，推送的摘要是空的。
+        const string screen = """
+        ╭──────────────────────────────╮
+        │ > 删掉 build 目录             │
+        ╰──────────────────────────────╯
+        ╭──────────────────────────────╮
+        │ ?  Shell rm -rf build         │
+        │ Allow execution?              │
+        │ ● 1. Yes, allow once          │
+        │   2. Yes, allow always        │
+        │   3. No, suggest changes      │
+        ╰──────────────────────────────╯
+        """;
+        Assert.Contains("3. No, suggest changes", ReplyExtractor.ScreenExcerpt(screen), StringComparison.Ordinal);
+        Assert.Contains("Allow execution?", ReplyExtractor.RecentContent(screen, 20), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Reply_anchored_on_a_boxed_prompt_has_no_border_line()
+    {
+        const string screen = """
+        ╭──────────────────────────────╮
+        │ > 列出当前目录                │
+        ╰──────────────────────────────╯
+        ✦ 这里有 3 个文件。
+        ╭──────────────────────────────╮
+        │ >   Type your message        │
+        ╰──────────────────────────────╯
+        """;
+        Assert.Equal("✦ 这里有 3 个文件。", ReplyExtractor.FromTerminal(screen, 1000, "列出当前目录"));
+    }
+
+    [Fact]
+    public void Invisible_characters_do_not_hide_an_echoed_prompt() =>
+        Assert.True(ReplyExtractor.MayShowPrompt("❯ ❤ 请把这个函数改成异步", "❤️ 请把这个函数改成异步"));
+
+    [Fact]
     public void Wrapped_or_pasted_prompts_count_as_visible()
     {
         // 折行、缩进、边框都不影响；长文字被折叠成 [Pasted text …] 时判断不了，按"看得到"处理。
@@ -318,6 +357,25 @@ public class ApprovalNavigatorTests
         Assert.Equal(["enter"], plan?.Keys);
         Assert.Equal("Yes, allow", plan?.OptionText);
     }
+
+    [Theory]
+    [InlineData("  > Note:\n    1. Run the tests\n    2. Push")]
+    [InlineData("❯ 请按顺序做：\n  1. 运行测试\n  2. 提交代码")]
+    [InlineData("• 下一步建议：\n› 1. Run the tests\n  2. Push to dev")]
+    public void Lists_without_a_decline_option_are_not_dialogs(string screen)
+    {
+        // 审查发现：agent 回复里的编号列表、回显的多行指令被当成确认框，/yes 会往里按回车。
+        Assert.False(ApprovalNavigator.TryPlanApprove(screen, out _, out var error));
+        Assert.Contains("没有找到确认框", error, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Yes, allow for this project")]
+    [InlineData("Yes, and trust this project permanently")]
+    [InlineData("Yes (globally)")]
+    [InlineData("允许，以后都不用问")]
+    public void Persistent_grants_are_never_picked(string grant) =>
+        Assert.Equal(-1, ApprovalNavigator.PickApproveOption([grant, "No"]));
 
     [Fact]
     public void Idle_input_box_is_not_mistaken_for_a_dialog()
