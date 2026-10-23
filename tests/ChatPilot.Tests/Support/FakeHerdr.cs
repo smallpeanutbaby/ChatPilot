@@ -17,13 +17,30 @@ internal sealed class FakeHerdr : IProcessRunner
 
     public sealed class Agent
     {
+        private string _status = "idle";
+
         public required string PaneId { get; init; }
 
         public string? Name { get; set; }
 
-        public string Kind { get; set; } = "claude";
+        /// <summary>agent 类型；null 表示这个 pane 里没有识别出 agent。</summary>
+        public string? Kind { get; set; } = "claude";
 
-        public string Status { get; set; } = "idle";
+        /// <summary>状态；每次变化状态序号加一（和真实 herdr 的 state_change_seq 一样）。</summary>
+        public string Status
+        {
+            get => _status;
+            set
+            {
+                if (_status != value)
+                {
+                    _status = value;
+                    Seq++;
+                }
+            }
+        }
+
+        public long Seq { get; private set; }
 
         public required string WorkspaceId { get; init; }
 
@@ -48,6 +65,15 @@ internal sealed class FakeHerdr : IProcessRunner
 
     /// <summary>agent start 时卡在确认框（返回 agent_not_ready）。</summary>
     public bool StartBlocked { get; set; }
+
+    /// <summary>让 agent start 返回这个错误码。</summary>
+    public string? StartError { get; set; }
+
+    /// <summary>让 agent read 返回这个错误码。</summary>
+    public string? ReadError { get; set; }
+
+    /// <summary>吞掉接下来这么多次提交（返回成功但 agent 没反应），模拟 Claude 界面还没准备好。</summary>
+    public int SwallowPrompts { get; set; }
 
     /// <summary>所有命令额外等待的时间（模拟节点很慢）。</summary>
     public TimeSpan CommandDelay { get; set; } = TimeSpan.Zero;
@@ -103,6 +129,11 @@ internal sealed class FakeHerdr : IProcessRunner
                 return Find(a[2]) is { } found ? Ok(new { type = "agent_info", agent = ToJson(found) }) : NotFound(a[2]);
 
             case "agent read":
+                if (ReadError is { } readError)
+                {
+                    return Error(readError, "simulated " + readError);
+                }
+
                 return Find(a[2]) is null ? NotFound(a[2]) : new ProcessResult(0, Screen, "");
 
             case "agent prompt":
@@ -117,18 +148,54 @@ internal sealed class FakeHerdr : IProcessRunner
                     return NotFound(a[2]);
                 }
 
-                agent.Status = "working";
-                if (a.Contains("--wait"))
+                if (SwallowPrompts > 0)
                 {
-                    await Task.Delay(PromptDelay, cancellationToken);
+                    SwallowPrompts--;
+                    return Ok(new { type = "agent_prompted", agent = ToJson(agent) });
                 }
 
-                agent.Status = StatusAfterPrompt;
+                // 和真实 herdr 一样：提交后立即返回，agent 在后台工作一段时间后停下。
+                agent.Status = "working";
+                var finalStatus = StatusAfterPrompt;
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(PromptDelay);
+                    agent.Status = finalStatus;
+                });
                 return Ok(new { type = "agent_prompted", agent = ToJson(agent) });
             }
 
             case "agent wait":
-                return Find(a[2]) is { } waited ? Ok(new { type = "agent_info", agent = ToJson(waited) }) : NotFound(a[2]);
+            {
+                // 和真实 herdr 一样：等到 --until 里的任一状态（默认 idle/done/blocked）才返回，超时报 timeout。
+                var until = a.Select((value, index) => (value, index)).Where(x => x.value == "--until").Select(x => a[x.index + 1]).ToList();
+                if (until.Count == 0)
+                {
+                    until = ["idle", "done", "blocked"];
+                }
+
+                var timeoutIndex = Array.IndexOf(a, "--timeout");
+                var deadline = DateTime.UtcNow + (timeoutIndex >= 0 ? TimeSpan.FromMilliseconds(long.Parse(a[timeoutIndex + 1], CultureInfo.InvariantCulture)) : timeout);
+                while (true)
+                {
+                    if (Find(a[2]) is not { } waited)
+                    {
+                        return NotFound(a[2]);
+                    }
+
+                    if (until.Contains(waited.Status))
+                    {
+                        return Ok(new { type = "agent_info", agent = ToJson(waited) });
+                    }
+
+                    if (DateTime.UtcNow >= deadline)
+                    {
+                        return Error("timeout", "timed out waiting for agent status");
+                    }
+
+                    await Task.Delay(20, cancellationToken);
+                }
+            }
 
             case "agent send-keys":
                 return Find(a[2]) is null ? NotFound(a[2]) : Ok(new { type = "ok" });
@@ -176,6 +243,11 @@ internal sealed class FakeHerdr : IProcessRunner
                 var name = a[2];
                 var kind = a[Array.IndexOf(a, "--kind") + 1];
                 var pane = a[Array.IndexOf(a, "--pane") + 1];
+                if (StartError is { } startError)
+                {
+                    return Error(startError, "simulated " + startError);
+                }
+
                 lock (_lock)
                 {
                     _agents.Add(new Agent { PaneId = pane, Name = name, Kind = kind, Status = StartBlocked ? "blocked" : "idle", WorkspaceId = pane.Split(':')[0] });
@@ -216,6 +288,7 @@ internal sealed class FakeHerdr : IProcessRunner
         {
             agent = agent.Kind,
             agent_status = agent.Status,
+            state_change_seq = agent.Seq,
             name = agent.Name,
             pane_id = agent.PaneId,
             workspace_id = agent.WorkspaceId,

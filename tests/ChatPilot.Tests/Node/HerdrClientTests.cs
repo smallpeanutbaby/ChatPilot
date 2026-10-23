@@ -3,6 +3,7 @@ using ChatPilot.Tests.Support;
 
 namespace ChatPilot.Tests.Node;
 
+/// <summary>herdr 命令行调用（S-08）：参数按数组原样传递、不经过 shell、错误码解析。</summary>
 public class HerdrClientTests
 {
     private sealed class RecordingRunner(ProcessResult result) : IProcessRunner
@@ -30,7 +31,7 @@ public class HerdrClientTests
         // S-08：特殊字符原样作为一个参数传给进程，不经过 shell。
         var runner = new RecordingRunner(PromptOk);
         var client = new HerdrClient(runner, "/opt/herdr", null, TimeSpan.FromSeconds(5));
-        await client.PromptAsync("w1:p1", text, null, CancellationToken.None);
+        await client.PromptAsync("w1:p1", text, CancellationToken.None);
         var (file, args) = Assert.Single(runner.Calls);
         Assert.Equal("/opt/herdr", file);
         Assert.Equal(["agent", "prompt", "w1:p1", text], args);
@@ -44,18 +45,45 @@ public class HerdrClientTests
     {
         var runner = new RecordingRunner(PromptOk);
         var client = new HerdrClient(runner, "herdr", null, TimeSpan.FromSeconds(5));
-        await client.PromptAsync("w1:p1", text, null, CancellationToken.None);
+        await client.PromptAsync("w1:p1", text, CancellationToken.None);
         Assert.Equal(" " + text, runner.Calls[0].Args[3]);
     }
 
     [Fact]
-    public async Task Session_and_wait_options_are_added()
+    public async Task Session_option_is_added_and_prompt_does_not_keep_text_in_a_long_running_process()
     {
+        // 审查 #18：不用 --wait，文字不会作为参数挂在一个跑几个小时的进程上。
         var runner = new RecordingRunner(PromptOk);
         var client = new HerdrClient(runner, "herdr", "cptest", TimeSpan.FromSeconds(5));
-        var agent = await client.PromptAsync("tideq", "hi", TimeSpan.FromMinutes(2), CancellationToken.None);
-        Assert.Equal(["--session", "cptest", "agent", "prompt", "tideq", "hi", "--wait", "--timeout", "120000"], runner.Calls[0].Args);
+        var agent = await client.PromptAsync("tideq", "hi", CancellationToken.None);
+        Assert.Equal(["--session", "cptest", "agent", "prompt", "tideq", "hi"], runner.Calls[0].Args);
         Assert.Equal("idle", agent?.Status);
+    }
+
+    [Theory]
+    [InlineData("""{"id":"x","result":"oops"}""")]
+    [InlineData("""{"id":"x","result":{"agent":"not an object"}}""")]
+    [InlineData("""[1,2,3]""")]
+    public async Task Unexpected_json_shapes_become_bad_response(string output)
+    {
+        // 审查 #2：返回结构不对时只抛 HerdrException，不会抛出其他异常导致通知丢失。
+        var client = new HerdrClient(new RecordingRunner(new ProcessResult(0, output, "")), "herdr", null, TimeSpan.FromSeconds(5));
+        var ex = await Assert.ThrowsAsync<HerdrException>(() => client.GetAgentAsync("x", CancellationToken.None));
+        Assert.Equal("bad_response", ex.Code);
+        Assert.Empty(await RecoverEmptyList(output));
+    }
+
+    private static async Task<IReadOnlyList<HerdrAgent>> RecoverEmptyList(string output)
+    {
+        var client = new HerdrClient(new RecordingRunner(new ProcessResult(0, output, "")), "herdr", null, TimeSpan.FromSeconds(5));
+        try
+        {
+            return await client.ListAgentsAsync(CancellationToken.None);
+        }
+        catch (HerdrException)
+        {
+            return [];
+        }
     }
 
     [Fact]

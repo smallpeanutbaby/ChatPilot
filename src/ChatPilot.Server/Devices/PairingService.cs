@@ -21,18 +21,29 @@ public sealed class PairingService(StateStore store, TimeProvider time, IOptions
     private readonly Lock _lock = new();
     private readonly List<PendingCode> _codes = [];
 
+    /// <summary>一个还没被使用的配对码。</summary>
+    /// <param name="Code">8 位配对码（不含短横线）。</param>
+    /// <param name="DeviceName">发 /pair 时预先指定的设备名。</param>
+    /// <param name="ExpiresAt">过期时间。</param>
     public sealed record PendingCode(string Code, string? DeviceName, DateTimeOffset ExpiresAt)
     {
         /// <summary>给人看的格式：ABCD-EFGH。</summary>
         public string Display => Code[..4] + "-" + Code[4..];
     }
 
+    /// <summary>兑换配对码的结果。</summary>
     public abstract record RedeemResult;
 
+    /// <summary>配对成功。</summary>
+    /// <param name="Device">新设备。</param>
+    /// <param name="Token">设备令牌明文，只返回给节点这一次。</param>
     public sealed record Paired(DeviceRecord Device, string Token) : RedeemResult;
 
+    /// <summary>配对码不存在、已用过或已过期。</summary>
     public sealed record InvalidCode : RedeemResult;
 
+    /// <summary>设备名不合法。</summary>
+    /// <param name="Message">给用户看的说明。</param>
     public sealed record InvalidName(string Message) : RedeemResult;
 
     /// <summary>生成配对码；<paramref name="deviceName"/> 可以提前指定设备名。</summary>

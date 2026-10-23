@@ -8,6 +8,7 @@ public static class CertificatePin
 {
     private const string Prefix = "sha256:";
 
+    /// <summary>计算证书指纹。</summary>
     public static string Compute(X509Certificate certificate)
     {
         ArgumentNullException.ThrowIfNull(certificate);

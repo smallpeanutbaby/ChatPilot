@@ -8,6 +8,8 @@ namespace ChatPilot.Node.Execution;
 /// <summary>取 agent 的最后一条回复和屏幕摘要：有 Claude 会话记录就读记录，没有就读终端。</summary>
 public sealed partial class ReplyService(HerdrClient herdr, NodeConfig config, ILogger<ReplyService> logger)
 {
+    /// <summary>取 agent 的最后一条回复，超长时保留结尾部分。</summary>
+    /// <exception cref="HerdrException">读终端失败。</exception>
     public async Task<string> GetLastReplyAsync(HerdrAgent agent, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(agent);
@@ -22,6 +24,8 @@ public sealed partial class ReplyService(HerdrClient herdr, NodeConfig config, I
         return reply.Length > 0 ? reply : "（没有提取到回复内容，可以用 /read 查看终端）";
     }
 
+    /// <summary>当前屏幕的摘要（去掉输入框和空行后的最后几行），用来展示确认框。</summary>
+    /// <exception cref="HerdrException">读终端失败。</exception>
     public async Task<string> GetScreenExcerptAsync(string target, CancellationToken cancellationToken)
     {
         var screen = await herdr.ReadAsync(target, "visible", 80, cancellationToken).ConfigureAwait(false);
@@ -82,14 +86,21 @@ public sealed partial class ReplyService(HerdrClient herdr, NodeConfig config, I
 
         roots.Add(Path.Combine(home, ".claude", "projects"));
         var reclaudeAccounts = Path.Combine(home, ".rec", "claude", "accounts");
-        if (Directory.Exists(reclaudeAccounts))
+        try
         {
-            roots.AddRange(Directory.EnumerateDirectories(reclaudeAccounts).Select(a => Path.Combine(a, "config", "projects")));
+            if (Directory.Exists(reclaudeAccounts))
+            {
+                roots.AddRange(Directory.EnumerateDirectories(reclaudeAccounts).Select(a => Path.Combine(a, "config", "projects")));
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogDebug(ex, "跳过无法读取的 reclaude 账号目录");
         }
 
         return roots.Where(Directory.Exists).Distinct(PathPolicy.PathComparer);
     }
 
-    [GeneratedRegex("^[A-Za-z0-9-]{1,64}$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^[A-Za-z0-9-]{1,64}\z", RegexOptions.CultureInvariant)]
     private static partial Regex SessionIdRegex();
 }

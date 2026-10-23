@@ -22,12 +22,14 @@ public static class ServerEndpoint
         };
     }
 
+    /// <summary>是不是本机地址（127.0.0.1、::1、localhost）。</summary>
     public static bool IsLoopback(Uri uri)
     {
         ArgumentNullException.ThrowIfNull(uri);
         return uri.IsLoopback || string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>节点连接用的 WebSocket 地址（https 对应 wss，http 对应 ws）。</summary>
     public static Uri WebSocketUri(Uri server)
     {
         ArgumentNullException.ThrowIfNull(server);
@@ -38,8 +40,10 @@ public static class ServerEndpoint
         return builder.Uri;
     }
 
+    /// <summary>配对接口地址。</summary>
     public static Uri PairUri(Uri server) => Combine(server, ProtocolInfo.PairPath);
 
+    /// <summary>健康检查地址。</summary>
     public static Uri HealthUri(Uri server) => Combine(server, ProtocolInfo.HealthPath);
 
     /// <summary>支持服务器挂在反向代理的子路径下，例如 https://example.com/chatpilot。</summary>

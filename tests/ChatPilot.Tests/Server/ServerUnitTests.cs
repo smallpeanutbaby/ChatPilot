@@ -9,6 +9,7 @@ using Microsoft.Extensions.Time.Testing;
 
 namespace ChatPilot.Tests.Server;
 
+/// <summary>聊天指令解析（F-22）。</summary>
 public class ChatCommandParserTests
 {
     [Theory]
@@ -102,6 +103,7 @@ public class ChatCommandParserTests
     }
 }
 
+/// <summary>配对码（S-03、S-05）：一次性、会过期、令牌只存哈希。</summary>
 public sealed class PairingServiceTests : IDisposable
 {
     private readonly TempDirectory _temp = new();
@@ -180,6 +182,7 @@ public sealed class PairingServiceTests : IDisposable
     }
 }
 
+/// <summary>服务器配置校验（S-12、S-15）和 iLink 细节。</summary>
 public class ServerOptionsTests
 {
     [Fact]
@@ -219,6 +222,7 @@ public class ServerOptionsTests
         Assert.Equal(0x0002040Au, ILinkClient.ClientVersion("2.4.10"));
 }
 
+/// <summary>回复格式。</summary>
 public class ReplyFormatterTests
 {
     [Fact]

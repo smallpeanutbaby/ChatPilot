@@ -13,8 +13,10 @@ public sealed class NodeConfig
     /// <summary>服务器证书指纹（<c>sha256:…</c>），https 时必填。</summary>
     public string? ServerFingerprint { get; set; }
 
+    /// <summary>配对时服务器分配的设备 ID。</summary>
     public string DeviceId { get; set; } = "";
 
+    /// <summary>设备名，手机上用它指定设备（例如 <c>@mac/tideq</c>）。</summary>
     public string DeviceName { get; set; } = "";
 
     /// <summary>设备令牌，相当于密码。</summary>
@@ -44,10 +46,10 @@ public sealed class NodeConfig
     /// <summary>额外的 Claude 会话记录目录（<c>…/projects</c>），用于读取完整回复。</summary>
     public List<string> ClaudeProjectRoots { get; set; } = [];
 
-    /// <summary>普通 herdr 调用的超时（秒）。要小于服务器等结果的时间（30 秒）。</summary>
+    /// <summary>单次 herdr 调用的超时（秒）。一条指令总共不超过 28 秒，服务器最多等 30 秒。</summary>
     public int CommandTimeoutSeconds { get; set; } = 25;
 
-    /// <summary>启动 agent 的超时（秒）。</summary>
+    /// <summary>等 agent 启动就绪的超时（秒）。整个启动过程不超过它加 20 秒，服务器最多等 120 秒。</summary>
     public int AgentStartTimeoutSeconds { get; set; } = 60;
 
     /// <summary>等一个任务做完最多等多久（小时）。</summary>
@@ -82,6 +84,11 @@ public sealed class NodeConfig
         if (string.IsNullOrWhiteSpace(HerdrPath))
         {
             errors.Add("HerdrPath 不能为空");
+        }
+        else if (IsScriptWrapper(HerdrPath))
+        {
+            // Windows 上启动 .cmd/.bat 会隐式经过 cmd.exe，参数按 cmd 规则解析，文字里的 & | % 可能被当成命令。
+            errors.Add("HerdrPath 必须是可执行文件，不能是 .cmd / .bat / .ps1 脚本");
         }
 
         if (HerdrSession is not null && !Validation.IsAgentName(HerdrSession))
@@ -120,14 +127,14 @@ public sealed class NodeConfig
             errors.Add($"DefaultAgentKind {DefaultAgentKind} 不是可用的类型");
         }
 
-        if (CommandTimeoutSeconds is < 5 or > 28)
+        if (CommandTimeoutSeconds is < 5 or > 25)
         {
-            errors.Add("CommandTimeoutSeconds 必须在 5–28 之间（服务器最多等 30 秒）");
+            errors.Add("CommandTimeoutSeconds 必须在 5–25 之间（一条指令总共要在 28 秒内完成，服务器最多等 30 秒）");
         }
 
-        if (AgentStartTimeoutSeconds is < 10 or > 110)
+        if (AgentStartTimeoutSeconds is < 10 or > 90)
         {
-            errors.Add("AgentStartTimeoutSeconds 必须在 10–110 之间（服务器最多等 120 秒）");
+            errors.Add("AgentStartTimeoutSeconds 必须在 10–90 之间（启动总共要在它加 20 秒内完成，服务器最多等 120 秒）");
         }
 
         if (PromptWaitHours is < 1 or > 48)
@@ -143,16 +150,25 @@ public sealed class NodeConfig
         return errors;
     }
 
+    /// <summary>脚本包装器（Windows 上会经过命令解释器），不能作为 herdr 可执行文件。</summary>
+    public static bool IsScriptWrapper(string path) =>
+        path.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase)
+        || path.EndsWith(".bat", StringComparison.OrdinalIgnoreCase)
+        || path.EndsWith(".ps1", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>这个 agent 类型能不能用：herdr 内置类型，或者配置了启动方式的类型。</summary>
     public bool IsKindAvailable(string kind) => Launchers.ContainsKey(kind) || Validation.BuiltInAgentKinds.Contains(kind);
 
     /// <summary>可用类型列表，给用户看。</summary>
     public IEnumerable<string> AvailableKinds() =>
         Validation.BuiltInAgentKinds.Concat(Launchers.Keys).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal);
 
+    /// <summary>规范化后的证书指纹；没配置或格式不对时为 null。</summary>
     [JsonIgnore]
     public string? NormalizedFingerprint => CertificatePin.Normalize(ServerFingerprint);
 }
 
+/// <summary>自定义的 agent 启动方式（例如 reclaude）。</summary>
 public sealed class AgentLauncher
 {
     /// <summary>在新终端里运行的命令（来自本机配置，不接受远程输入）。</summary>

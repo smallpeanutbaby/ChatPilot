@@ -18,6 +18,7 @@ public sealed class ChatDispatcher(
     IOptions<ServerOptions> options,
     ILogger<ChatDispatcher> logger)
 {
+    /// <summary>管家 agent 的固定名字。</summary>
     public const string ButlerName = "butler";
 
     /// <summary>创建管家时发给它的说明。</summary>
@@ -32,6 +33,7 @@ public sealed class ChatDispatcher(
         现在只回复"管家已就绪"。
         """;
 
+    private readonly SemaphoreSlim _serial = new(1, 1);
     private readonly Lock _listingLock = new();
     private List<ListedAgent> _lastListing = [];
 
@@ -39,13 +41,36 @@ public sealed class ChatDispatcher(
 
     private sealed record Resolved(DeviceRecord Device, AgentSummary Agent)
     {
+        /// <summary>回复里显示的名字，例如 <c>[mac] tideq</c>。</summary>
         public string Label => $"[{Device.Name}] {Agent.DisplayName}";
+
+        /// <summary>
+        /// 发给节点的目标：优先用 agent 名字。名字在 agent 退出时会被清除，
+        /// 如果那个 pane 已经换成了别的程序，用名字会找不到而不是发错对象。
+        /// </summary>
+        public string Target => Agent.Name ?? Agent.PaneId;
     }
 
     private TimeSpan CommandTimeout => TimeSpan.FromSeconds(options.Value.CommandTimeoutSeconds);
 
-    /// <summary>处理一条主人的消息，返回回复文字。不会抛异常。</summary>
+    /// <summary>
+    /// 处理一条主人的消息，返回回复文字。不会抛异常（取消除外）。
+    /// 所有消息严格排队、一条一条处理：先发的 <c>/use</c> 一定在后发的指令之前生效，<c>@序号</c> 用的一定是之前那次 <c>/ls</c> 的结果。
+    /// </summary>
     public async Task<string> HandleAsync(string text, CancellationToken cancellationToken)
+    {
+        await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await HandleCoreAsync(text, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _serial.Release();
+        }
+    }
+
+    private async Task<string> HandleCoreAsync(string text, CancellationToken cancellationToken)
     {
         var command = ChatCommandParser.Parse(text);
         try
@@ -227,7 +252,7 @@ public sealed class ChatDispatcher(
             return "❓ " + error;
         }
 
-        var outcome = await hub.SendAsync(resolved.Device.Id, new ReadCommand(resolved.Agent.PaneId, command.Lines), CommandTimeout, cancellationToken)
+        var outcome = await hub.SendAsync(resolved.Device.Id, new ReadCommand(resolved.Target, command.Lines), CommandTimeout, cancellationToken)
             .ConfigureAwait(false);
         return outcome is { Ok: true, Data: TextData data }
             ? $"🖥 {resolved.Label} 最近的输出：\n\n{data.Text}"
@@ -242,7 +267,7 @@ public sealed class ChatDispatcher(
             return "❓ " + error;
         }
 
-        var outcome = await hub.SendAsync(resolved.Device.Id, new PromptCommand(resolved.Agent.PaneId, command.Text), CommandTimeout, cancellationToken)
+        var outcome = await hub.SendAsync(resolved.Device.Id, new PromptCommand(resolved.Target, command.Text), CommandTimeout, cancellationToken)
             .ConfigureAwait(false);
         return outcome.Ok
             ? $"📨 已发给 {resolved.Label}，做完会通知你"
@@ -317,7 +342,7 @@ public sealed class ChatDispatcher(
             return "❓ " + error;
         }
 
-        var outcome = await hub.SendAsync(resolved.Device.Id, new RespondCommand(resolved.Agent.PaneId, command.Approve), CommandTimeout, cancellationToken)
+        var outcome = await hub.SendAsync(resolved.Device.Id, new RespondCommand(resolved.Target, command.Approve), CommandTimeout, cancellationToken)
             .ConfigureAwait(false);
         return outcome is { Ok: true, Data: AckData ack }
             ? $"👌 {resolved.Label}：{ack.Message}"
@@ -332,7 +357,7 @@ public sealed class ChatDispatcher(
             return "❓ " + error;
         }
 
-        var outcome = await hub.SendAsync(resolved.Device.Id, new SendKeysCommand(resolved.Agent.PaneId, command.Keys), CommandTimeout, cancellationToken)
+        var outcome = await hub.SendAsync(resolved.Device.Id, new SendKeysCommand(resolved.Target, command.Keys), CommandTimeout, cancellationToken)
             .ConfigureAwait(false);
         return outcome is { Ok: true, Data: AckData ack } ? $"👌 {resolved.Label}：{ack.Message}" : ReplyFormatter.Failure(outcome);
     }
@@ -345,7 +370,7 @@ public sealed class ChatDispatcher(
             return "❓ " + error;
         }
 
-        var outcome = await hub.SendAsync(resolved.Device.Id, new RenameAgentCommand(resolved.Agent.PaneId, command.Name), CommandTimeout, cancellationToken)
+        var outcome = await hub.SendAsync(resolved.Device.Id, new RenameAgentCommand(resolved.Target, command.Name), CommandTimeout, cancellationToken)
             .ConfigureAwait(false);
         return outcome is { Ok: true, Data: AckData ack } ? $"👌 {resolved.Label}：{ack.Message}" : ReplyFormatter.Failure(outcome);
     }
@@ -373,7 +398,8 @@ public sealed class ChatDispatcher(
             return "❓ " + UnknownDevice(name);
         }
 
-        store.Update(state =>
+        // 撤销必须立即生效：哪怕写盘失败，也先从内存里删掉并断开连接。
+        var saved = store.UpdateBestEffort(state =>
         {
             state.Devices.RemoveAll(d => d.Id == device.Id);
             if (state.SelectedDeviceId == device.Id)
@@ -381,14 +407,16 @@ public sealed class ChatDispatcher(
                 state.SelectedDeviceId = null;
             }
         });
-        await hub.DisconnectAsync(device.Id, "device revoked").ConfigureAwait(false);
+        await hub.DisconnectAsync(device.Id).ConfigureAwait(false);
         lock (_listingLock)
         {
             _lastListing.RemoveAll(l => l.Device.Id == device.Id);
         }
 
         logger.LogInformation("设备 {Device} 已撤销", device.Name);
-        return $"🗑 已撤销设备 {device.Name}，它的令牌立即失效。";
+        return saved
+            ? $"🗑 已撤销设备 {device.Name}，它的令牌立即失效。"
+            : $"⚠️ 已撤销设备 {device.Name} 并断开连接，但保存到磁盘失败：服务器重启后它会恢复。请检查服务器磁盘后再发一次 /unpair {device.Name}。";
     }
 
     /// <summary>默认设备：已选的设备；没选时如果只有一台在线就用它。</summary>

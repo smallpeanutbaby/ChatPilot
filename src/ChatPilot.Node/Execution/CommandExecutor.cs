@@ -23,20 +23,31 @@ public sealed class CommandExecutor(
     private const int ReadOverscanLines = 80;
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(500);
 
+    /// <summary>普通指令的总时间预算：服务器最多等 30 秒，节点要在那之前给出结果。</summary>
+    internal static readonly TimeSpan CommandBudget = TimeSpan.FromSeconds(28);
+
+    /// <summary>启动 agent 的总时间预算（服务器最多等 120 秒）。</summary>
+    private TimeSpan StartBudget => TimeSpan.FromSeconds(config.AgentStartTimeoutSeconds + 20);
+
+    /// <summary>执行一条指令。不会抛出异常（节点退出时的取消除外），所有失败都转成失败结果。</summary>
     public async Task<CommandOutcome> ExecuteAsync(NodeCommand command, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(command);
+        var budget = command is StartAgentCommand ? StartBudget : CommandBudget;
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(budget);
+        var token = deadline.Token;
         try
         {
             return command switch
             {
-                ListAgentsCommand => await ListAsync(cancellationToken).ConfigureAwait(false),
-                PromptCommand prompt => await PromptAsync(prompt, cancellationToken).ConfigureAwait(false),
-                ReadCommand read => await ReadAsync(read, cancellationToken).ConfigureAwait(false),
-                StartAgentCommand start => await StartAgentAsync(start, cancellationToken).ConfigureAwait(false),
-                SendKeysCommand keys => await SendKeysAsync(keys, cancellationToken).ConfigureAwait(false),
-                RespondCommand respond => await RespondAsync(respond, cancellationToken).ConfigureAwait(false),
-                RenameAgentCommand rename => await RenameAsync(rename, cancellationToken).ConfigureAwait(false),
+                ListAgentsCommand => await ListAsync(token).ConfigureAwait(false),
+                PromptCommand prompt => await PromptAsync(prompt, token).ConfigureAwait(false),
+                ReadCommand read => await ReadAsync(read, token).ConfigureAwait(false),
+                StartAgentCommand start => await StartAgentAsync(start, token).ConfigureAwait(false),
+                SendKeysCommand keys => await SendKeysAsync(keys, token).ConfigureAwait(false),
+                RespondCommand respond => await RespondAsync(respond, token).ConfigureAwait(false),
+                RenameAgentCommand rename => await RenameAsync(rename, token).ConfigureAwait(false),
                 _ => CommandOutcome.Failure(ErrorCodes.InvalidArgument, "不支持的指令"),
             };
         }
@@ -48,6 +59,10 @@ public sealed class CommandExecutor(
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (OperationCanceledException)
+        {
+            return CommandOutcome.Failure(ErrorCodes.Timeout, $"节点在 {budget.TotalSeconds:0} 秒内没有完成，已放弃");
         }
         catch (Exception ex)
         {
@@ -96,9 +111,14 @@ public sealed class CommandExecutor(
         }
 
         var agent = await herdr.GetAgentAsync(command.Target, cancellationToken).ConfigureAwait(false);
+        if (agent.Kind is null)
+        {
+            return CommandOutcome.Failure(ErrorCodes.NotFound, "这个 pane 里没有识别出 agent");
+        }
+
         if (agent.Status == AgentStatus.Blocked)
         {
-            var screen = await replies.GetScreenExcerptAsync(agent.PaneId, cancellationToken).ConfigureAwait(false);
+            var screen = await ScreenExcerptOrNoteAsync(agent.PaneId, cancellationToken).ConfigureAwait(false);
             return CommandOutcome.Failure(ErrorCodes.AgentBlocked, "它正在等你确认，先回复 /yes 或 /no：\n\n" + screen);
         }
 
@@ -172,18 +192,27 @@ public sealed class CommandExecutor(
                 ? await LaunchWithCommandAsync(launcher, paneId, name, cancellationToken).ConfigureAwait(false)
                 : await LaunchBuiltInAsync(kind, paneId, name, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is HerdrException or TimeoutException)
+        catch (Exception ex)
         {
+            // 任何失败（包括超时、连接断开导致的取消）都不能留下半启动的工作区。
             await CloseQuietlyAsync(workspaceId).ConfigureAwait(false);
-            return ex is HerdrException herdrError
-                ? MapHerdrError(herdrError)
-                : CommandOutcome.Failure(ErrorCodes.Timeout, ex.Message);
+            if (ex is HerdrException herdrError)
+            {
+                return MapHerdrError(herdrError);
+            }
+
+            if (ex is TimeoutException)
+            {
+                return CommandOutcome.Failure(ErrorCodes.Timeout, ex.Message);
+            }
+
+            throw;
         }
 
         string? screen = null;
         if (agent.Status == AgentStatus.Blocked)
         {
-            screen = await replies.GetScreenExcerptAsync(agent.PaneId, cancellationToken).ConfigureAwait(false);
+            screen = await ScreenExcerptOrNoteAsync(agent.PaneId, cancellationToken).ConfigureAwait(false);
         }
 
         if (!string.IsNullOrWhiteSpace(command.InitialPrompt))
@@ -270,6 +299,12 @@ public sealed class CommandExecutor(
         }
 
         await herdr.SendKeysAsync(command.Target, command.Keys, cancellationToken).ConfigureAwait(false);
+        if (command.Keys.Any(IsConfirmKey) && await herdr.TryGetAgentAsync(command.Target, cancellationToken).ConfigureAwait(false) is { } agent)
+        {
+            // 用 /keys 手动处理了确认框，同样要跟踪到做完再通知。
+            tracker.WatchAfterResponse(agent);
+        }
+
         return CommandOutcome.Success(new AckData("已发送按键：" + string.Join(" ", command.Keys)));
     }
 
@@ -286,14 +321,15 @@ public sealed class CommandExecutor(
             return CommandOutcome.Success(new AckData("已按 Esc（拒绝 / 取消）"));
         }
 
-        var screen = await herdr.ReadAsync(command.Target, "visible", 80, cancellationToken).ConfigureAwait(false);
+        var agent = await herdr.GetAgentAsync(command.Target, cancellationToken).ConfigureAwait(false);
+        var screen = await herdr.ReadAsync(agent.PaneId, "visible", 80, cancellationToken).ConfigureAwait(false);
         if (!ApprovalNavigator.TryPlanApprove(screen, out var plan, out var error) || plan is null)
         {
             return CommandOutcome.Failure(ErrorCodes.NotFound, error + "\n\n" + ReplyExtractor.ScreenExcerpt(screen, 15));
         }
 
-        await herdr.SendKeysAsync(command.Target, plan.Keys, cancellationToken).ConfigureAwait(false);
-        tracker.WatchAfterResponse(command.Target);
+        await herdr.SendKeysAsync(agent.PaneId, plan.Keys, cancellationToken).ConfigureAwait(false);
+        tracker.WatchAfterResponse(agent);
         return CommandOutcome.Success(new AckData($"已选择：{plan.OptionText}"));
     }
 
@@ -311,6 +347,23 @@ public sealed class CommandExecutor(
 
         await herdr.RenameAsync(command.Target, command.Name, cancellationToken).ConfigureAwait(false);
         return CommandOutcome.Success(new AckData($"已改名为 {command.Name}"));
+    }
+
+    /// <summary>可能是在确认框里做选择的按键。</summary>
+    private static bool IsConfirmKey(string key) => key is "enter" or "y" || (key.Length == 1 && char.IsAsciiDigit(key[0]));
+
+    /// <summary>屏幕摘要；读取失败时返回提示文字，不影响主流程。</summary>
+    private async Task<string> ScreenExcerptOrNoteAsync(string target, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await replies.GetScreenExcerptAsync(target, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HerdrException ex)
+        {
+            logger.LogWarning("读取 {Target} 的屏幕失败：{Message}", target, ex.Message);
+            return "（读取屏幕失败，请用 /read 查看）";
+        }
     }
 
     private static CommandOutcome? InvalidTarget(string? target) =>

@@ -4,9 +4,13 @@ using System.Net.WebSockets;
 namespace ChatPilot.Shared.Protocol;
 
 /// <summary>对方违反协议（消息太大、格式不对）。<see cref="CloseStatus"/> 是关闭连接时用的状态码。</summary>
-public sealed class WireProtocolException(string message, WebSocketCloseStatus closeStatus) : Exception(message)
+public sealed class WireProtocolException(string message, WebSocketCloseStatus closeStatus, byte[]? payload = null) : Exception(message)
 {
+    /// <summary>关闭连接时应当使用的状态码。</summary>
     public WebSocketCloseStatus CloseStatus { get; } = closeStatus;
+
+    /// <summary>无法解析的原始消息（只在消息完整但内容不合法时提供），用于判断是不是一条"不认识的指令"。</summary>
+    public byte[]? Payload { get; } = payload;
 }
 
 /// <summary>按"一条 WebSocket 消息 = 一个 JSON"的约定收发，并限制单条消息大小。</summary>
@@ -48,7 +52,7 @@ public static class WebSocketMessaging
 
             if (!ProtocolJson.TryDeserialize(payload.GetBuffer().AsSpan(0, (int)payload.Length), out var message))
             {
-                throw new WireProtocolException("无法解析的协议消息", WebSocketCloseStatus.InvalidPayloadData);
+                throw new WireProtocolException("无法解析的协议消息", WebSocketCloseStatus.InvalidPayloadData, payload.ToArray());
             }
 
             return message;

@@ -168,7 +168,7 @@ internal sealed class NodeHarness : IAsyncDisposable
         var client = new HerdrClient(herdr, "herdr", null, TimeSpan.FromSeconds(config.CommandTimeoutSeconds));
         var events = new AgentEventQueue(NullLogger<AgentEventQueue>.Instance);
         var replies = new ReplyService(client, config, NullLogger<ReplyService>.Instance);
-        var tracker = new PromptTracker(client, replies, events, config, NullLogger<PromptTracker>.Instance);
+        var tracker = new PromptTracker(client, replies, events, config, NullLogger<PromptTracker>.Instance, initialPromptGrace: TimeSpan.FromMilliseconds(50));
         var executor = new CommandExecutor(client, new PathPolicy(config.AllowedRoots), tracker, replies, config, NullLogger<CommandExecutor>.Instance);
         var connection = new ServerConnection(
             new Uri(factory.Server.BaseAddress, ProtocolInfo.NodeWebSocketPath),

@@ -30,6 +30,7 @@ public static class ServerApp
         配置在 appsettings.json 的 ChatPilot 节，也可以用环境变量覆盖，例如 ChatPilot__Port=9443。
         """;
 
+    /// <summary>运行服务器命令行，返回进程退出码：0 成功，1 出错。</summary>
     public static async Task<int> RunAsync(string[] args)
     {
         ArgumentNullException.ThrowIfNull(args);
@@ -49,17 +50,26 @@ public static class ServerApp
         }
 
         var app = Build(hostArgs);
-        if (command == "run")
-        {
-            await app.RunAsync().ConfigureAwait(false);
-            return 0;
-        }
-
         var options = app.Services.GetRequiredService<IOptions<ServerOptions>>().Value;
         if (options.Validate() is { Count: > 0 } errors)
         {
             Console.Error.WriteLine("❌ 配置有问题：\n- " + string.Join("\n- ", errors));
             return 1;
+        }
+
+        if (command == "run")
+        {
+            try
+            {
+                await app.RunAsync().ConfigureAwait(false);
+                return 0;
+            }
+            catch (InvalidDataException ex)
+            {
+                // 状态文件损坏等需要人工处理的问题：给出清楚的说明，不输出一大段堆栈。
+                Console.Error.WriteLine("❌ " + ex.Message);
+                return 1;
+            }
         }
 
         if (command == "fingerprint")
@@ -81,6 +91,7 @@ public static class ServerApp
         return ok ? 0 : 1;
     }
 
+    /// <summary>构建服务器（注册服务、配置 Kestrel、映射接口），不启动。测试里也用它启动真实的 Kestrel。</summary>
     public static WebApplication Build(string[] args)
     {
         // 配置文件跟着程序走：开机自启时工作目录往往不是程序所在目录。
@@ -99,6 +110,7 @@ public static class ServerApp
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton(sp => new StateStore(sp.GetRequiredService<IOptions<ServerOptions>>().Value.ResolvedDataDir));
         services.AddSingleton<CertificateProvider>();
+        services.AddSingleton<AuthFailureLimiter>();
         services.AddSingleton<ServerIdentity>();
         services.AddSingleton<PairingService>();
         services.AddSingleton<ChatChannelRegistry>();
@@ -123,7 +135,7 @@ public static class ServerApp
         {
             limiter.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
             limiter.AddPolicy("pair", context => PerIp(context, permits: 5));
-            limiter.AddPolicy("ws", context => PerIp(context, permits: 30));
+            limiter.AddPolicy("ws", context => PerIp(context, permits: 60));
             limiter.AddPolicy("dev", context => PerIp(context, permits: 300));
         });
 
@@ -148,7 +160,8 @@ public static class ServerApp
 
     private static void MapEndpoints(WebApplication app)
     {
-        app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
+        // 定期 ping 并要求节点回应：笔记本睡眠、断网后 20 秒左右就能判定离线，而不是等 TCP 超时（十几分钟）。
+        app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(20), KeepAliveTimeout = TimeSpan.FromSeconds(20) });
         app.UseRateLimiter();
 
         app.MapGet(ProtocolInfo.HealthPath, () => Results.Text("ok"));
@@ -156,6 +169,13 @@ public static class ServerApp
         app.Map(ProtocolInfo.NodeWebSocketPath, AcceptNodeAsync).RequireRateLimiting("ws");
 
         var options = app.Services.GetRequiredService<IOptions<ServerOptions>>().Value;
+
+        // 通道在这里登记，而不是等后台服务跑起来：.NET 10 的后台服务在线程池上启动，启动瞬间的通知可能会漏掉。
+        if (options.WeChat.Enabled)
+        {
+            app.Services.GetRequiredService<ChatChannelRegistry>().Register(app.Services.GetRequiredService<WeChatChannel>());
+        }
+
         if (options.DevChannel.Enabled)
         {
             app.Services.GetRequiredService<ChatChannelRegistry>().Register(app.Services.GetRequiredService<DevChannel>());
@@ -187,12 +207,20 @@ public static class ServerApp
     }
 
     /// <summary>先验设备令牌再升级 WebSocket：令牌不对直接 401，不会建立连接。</summary>
-    private static async Task AcceptNodeAsync(HttpContext context, StateStore store, DeviceHub hub)
+    private static async Task AcceptNodeAsync(HttpContext context, StateStore store, DeviceHub hub, AuthFailureLimiter failures)
     {
+        var source = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        if (failures.IsBlocked(source))
+        {
+            context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+            return;
+        }
+
         var header = context.Request.Headers.Authorization.ToString();
         var token = header.StartsWith("Bearer ", StringComparison.Ordinal) ? header["Bearer ".Length..].Trim() : null;
         if (store.FindDeviceByToken(token) is not { } device)
         {
+            failures.RecordFailure(source);
             context.Response.StatusCode = StatusCodes.Status401Unauthorized;
             return;
         }
@@ -257,6 +285,7 @@ public static class ServerApp
 /// <summary>启动时校验配置，有问题拒绝启动。</summary>
 internal sealed class ServerOptionsValidator : IValidateOptions<ServerOptions>
 {
+    /// <inheritdoc />
     public ValidateOptionsResult Validate(string? name, ServerOptions options) =>
         options.Validate() is { Count: > 0 } errors ? ValidateOptionsResult.Fail(errors) : ValidateOptionsResult.Success;
 }

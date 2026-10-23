@@ -8,11 +8,15 @@ public static class NodeConfigStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
+    /// <summary>默认配置文件路径：<c>~/.chatpilot/node.json</c>，可以用环境变量 <c>CHATPILOT_NODE_CONFIG</c> 覆盖。</summary>
     public static string DefaultPath =>
         Environment.GetEnvironmentVariable("CHATPILOT_NODE_CONFIG") is { Length: > 0 } overridden
             ? overridden
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".chatpilot", "node.json");
 
+    /// <summary>读取并校验配置。</summary>
+    /// <exception cref="FileNotFoundException">还没配对。</exception>
+    /// <exception cref="InvalidDataException">配置有问题，异常消息里列出了所有问题。</exception>
     public static NodeConfig Load(string path)
     {
         if (!File.Exists(path))
@@ -31,6 +35,7 @@ public static class NodeConfigStore
         return config;
     }
 
+    /// <summary>保存配置（权限 600，原子替换）。</summary>
     public static void Save(string path, NodeConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);

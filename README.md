@@ -29,7 +29,7 @@
 | `@目标 内容` | 把任务交给 agent，做完会推送 Claude 的回复 |
 | `/read 目标 [行数]` | 看最近的终端输出 |
 | `/new [设备] 目录 [类型] [名字]` | 在允许的目录里新开工作区并启动 agent |
-| `/yes 目标` · `/no 目标` | 处理确认框（会自动选中"Yes"一类的选项） |
+| `/yes 目标` · `/no 目标` | 处理确认框：自动选中"这一次同意"的选项；"不再询问 / 全部允许"这类会扩大权限的选项不会自动选，会列出来让你用 `/keys` 自己选 |
 | `/keys 目标 按键…` | 发送白名单内的按键，例如 `/keys 1 down enter` |
 | `/name 目标 新名字` | 给 agent 改名 |
 | `/butler [设备]` | 创建管家 agent |
@@ -119,14 +119,18 @@ dotnet run --project src/ChatPilot.Node -- run
 - **微信不支持真正的主动推送**：ChatPilot 复用你最近一条消息的 context_token 发通知，长时间不说话后能否推送取决于腾讯。
 - **回复提取**：herdr 提供 Claude 会话记录时读记录；否则从终端界面提取最后一条回复。建议安装 herdr 的 Claude 集成：`herdr integration install claude`。
 - 节点或服务器重启时，正在等的任务不再推送结果，用 `/ls`、`/read` 查看。
-- 同一个设备令牌只能有一个节点在线，第二个会把第一个顶掉。
+- 同一个设备令牌只能有一个节点在线：新启动的会把旧的顶掉，被顶掉的那个自动退出。
+- 消息按顺序一条一条处理，一条很慢的指令（比如 `/new`）会让后面的消息稍等。
+- 不建议放在反向代理后面（限流会变成全局共享），原因见 [`docs/SECURITY.md`](docs/SECURITY.md)。
 
 ## 开发
 
 ```bash
-dotnet build ChatPilot.sln          # 警告视为错误
-dotnet test tests/ChatPilot.Tests   # 单元测试 + 集成测试 + 安全测试
+dotnet build ChatPilot.sln                    # 警告视为错误；src 下公开成员必须有 XML 文档注释
+dotnet test tests/ChatPilot.Tests --no-build  # 单元测试 + 集成测试 + 安全测试
 ```
+
+注释约定：公开和内部成员都写中文 XML 文档注释（`/// <summary>`），句末带句号；方法内部只在不显而易见的地方写行内注释，说明"为什么"而不是复述代码；术语统一用"服务器""节点""设备""agent""主人"。
 
 项目结构：
 

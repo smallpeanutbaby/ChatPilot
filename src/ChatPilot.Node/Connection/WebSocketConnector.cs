@@ -13,16 +13,20 @@ public interface IWebSocketConnector
     Task<WebSocket> ConnectAsync(Uri uri, string token, string? fingerprint, CancellationToken cancellationToken);
 }
 
+/// <summary>用 <see cref="ClientWebSocket"/> 连接服务器：带设备令牌、证书指纹校验和心跳超时检测。</summary>
 public sealed class ClientWebSocketConnector : IWebSocketConnector
 {
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(15);
 
+    /// <inheritdoc />
     public async Task<WebSocket> ConnectAsync(Uri uri, string token, string? fingerprint, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(uri);
         var socket = new ClientWebSocket();
         socket.Options.SetRequestHeader("Authorization", "Bearer " + token);
+        // 定期发 ping 并要求回应；对方 20 秒没回（服务器宕机、网络断了）就判定连接已死，触发重连。
         socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
+        socket.Options.KeepAliveTimeout = TimeSpan.FromSeconds(20);
         socket.Options.CollectHttpResponseDetails = true;
         if (uri.Scheme == "wss")
         {

@@ -21,8 +21,10 @@ public sealed partial class WeChatLogin(
     private const int MaxQrAttempts = 3;
     private static readonly TimeSpan LoginTimeout = TimeSpan.FromMinutes(8);
 
-    /// <summary>显示二维码的方式；默认打印到终端。测试里可以替换。</summary>
-    public Action<string, string> ShowQrCode { get; set; } = PrintToConsole;
+    /// <summary>
+    /// 显示二维码的方式，参数依次是：字符画、PNG 路径、登录链接（只在交互式登录时提供）。默认打印到终端，测试里可以替换。
+    /// </summary>
+    public Action<string, string, string?> ShowQrCode { get; set; } = PrintToConsole;
 
     /// <summary>
     /// 运行一次登录流程，成功返回 true。<paramref name="askVerifyCode"/> 为空时（后台服务模式）遇到验证码就放弃，
@@ -40,7 +42,7 @@ public sealed partial class WeChatLogin(
             return false;
         }
 
-        Show(qr.QrcodeImgContent);
+        Show(qr.QrcodeImgContent, interactive: askVerifyCode is not null);
         var baseUrl = options.Value.WeChat.BaseUrl;
         var attempts = 1;
         string? verifyCode = null;
@@ -94,7 +96,7 @@ public sealed partial class WeChatLogin(
                         return false;
                     }
 
-                    Show(qr.QrcodeImgContent);
+                    Show(qr.QrcodeImgContent, interactive: askVerifyCode is not null);
                     break;
 
                 case "binded_redirect":
@@ -168,36 +170,51 @@ public sealed partial class WeChatLogin(
         return true;
     }
 
-    private void Show(string content)
+    /// <summary>
+    /// 展示二维码。二维码等于"成为主人"的凭证，所以登录链接绝不写进日志：
+    /// 图片保存为权限 600 的 PNG；终端字符画只在交互式登录、或者输出是真实终端（不是日志文件）时显示。
+    /// </summary>
+    private void Show(string content, bool interactive)
     {
         var png = Path.Combine(options.Value.ResolvedDataDir, "wechat-login.png");
+        var ascii = "";
         try
         {
             using var generator = new QRCodeGenerator();
             using var data = generator.CreateQrCode(content, QRCodeGenerator.ECCLevel.L);
             SecureFile.WriteAllBytes(png, new PngByteQRCode(data).GetGraphic(8));
-            ShowQrCode(new AsciiQRCode(data).GetGraphicSmall(), png);
+            ascii = new AsciiQRCode(data).GetGraphicSmall();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             logger.LogWarning("保存二维码图片失败：{Message}", ex.Message);
         }
 
-        logger.LogInformation("二维码图片：{Path}；如果扫不了，用微信打开这个链接：{Link}", png, content);
+        if (interactive || !Console.IsOutputRedirected)
+        {
+            ShowQrCode(ascii, png, interactive ? content : null);
+        }
+
+        logger.LogInformation("微信登录二维码已保存到 {Path}（只有当前用户能读）。也可以停掉服务后运行 chatpilot-server login 在终端里扫码", png);
     }
 
-    private static void PrintToConsole(string ascii, string pngPath)
+    private static void PrintToConsole(string ascii, string pngPath, string? link)
     {
         Console.WriteLine();
         Console.WriteLine("用手机微信扫描下面的二维码，绑定 ChatPilot：");
         Console.WriteLine(ascii);
         Console.WriteLine($"（二维码图片也保存在 {pngPath}）");
+        if (link is not null)
+        {
+            Console.WriteLine($"如果扫不了，用微信打开这个链接：{link}");
+        }
+
         Console.WriteLine();
     }
 
     /// <summary>只接受腾讯的域名，防止被引导到其他服务器。</summary>
     internal static bool IsTrustedHost(string host) => TrustedHostRegex().IsMatch(host);
 
-    [GeneratedRegex(@"^([a-z0-9-]+\.)*(qq|weixin|wechat)\.com$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^([a-z0-9-]+\.)*(qq|weixin|wechat)\.com\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex TrustedHostRegex();
 }

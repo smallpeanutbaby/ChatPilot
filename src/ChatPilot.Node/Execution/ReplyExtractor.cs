@@ -202,6 +202,7 @@ public static partial class ReplyExtractor
         return TextChunker.TrimLines(compact.TakeLast(maxLines));
     }
 
+    /// <summary>按行拆分（兼容 CRLF），并去掉每行末尾的空白。</summary>
     internal static List<string> SplitLines(string text) =>
         text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n').Select(l => l.TrimEnd()).ToList();
 
@@ -244,6 +245,14 @@ public static partial class ReplyExtractor
     private static string TakeTail(string text, int maxChars) =>
         text.Length <= maxChars ? text : "…" + text[^(maxChars - 1)..];
 
+    /// <summary>安全地取字符串字段：不是对象、没有字段或类型不对时返回 null（会话记录格式随 Claude 版本变化）。</summary>
+    private static string? StringField(JsonElement element, string property) =>
+        element.ValueKind == JsonValueKind.Object
+        && element.TryGetProperty(property, out var value)
+        && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
     private static bool IsTrue(JsonElement element, string property) =>
         element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.True;
 
@@ -267,7 +276,7 @@ public static partial class ReplyExtractor
         var hasText = false;
         foreach (var block in content.EnumerateArray())
         {
-            var blockType = block.TryGetProperty("type", out var bt) ? bt.GetString() : null;
+            var blockType = StringField(block, "type");
             if (blockType == "tool_result")
             {
                 return false;
@@ -297,8 +306,8 @@ public static partial class ReplyExtractor
         }
 
         var parts = content.EnumerateArray()
-            .Where(b => b.TryGetProperty("type", out var bt) && bt.GetString() == "text")
-            .Select(b => b.TryGetProperty("text", out var tx) && tx.ValueKind == JsonValueKind.String ? tx.GetString() : null)
+            .Where(b => StringField(b, "type") == "text")
+            .Select(b => StringField(b, "text"))
             .Where(s => !string.IsNullOrWhiteSpace(s));
         return string.Join("\n\n", parts).Trim();
     }

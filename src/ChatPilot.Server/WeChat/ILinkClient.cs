@@ -21,6 +21,9 @@ public sealed class ILinkClient(HttpClient http, IOptions<ServerOptions> options
 
     private WeChatOptions WeChat => options.Value.WeChat;
 
+    /// <summary>获取登录二维码。</summary>
+    /// <param name="localTokens">本机已有的 bot token（插件的做法，让腾讯识别重复绑定）。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
     public async Task<QrCodeResponse> GetBotQrCodeAsync(IReadOnlyList<string> localTokens, CancellationToken cancellationToken)
     {
         var uri = Endpoint(WeChat.BaseUrl, $"ilink/bot/get_bot_qrcode?bot_type={Uri.EscapeDataString(WeChat.BotType)}");
@@ -63,6 +66,14 @@ public sealed class ILinkClient(HttpClient http, IOptions<ServerOptions> options
         }
     }
 
+    /// <summary>给用户发一条文字消息。</summary>
+    /// <param name="baseUrl">iLink 接口地址。</param>
+    /// <param name="token">bot token。</param>
+    /// <param name="toUserId">接收人。</param>
+    /// <param name="text">文字（调用方负责分段，单条不超过 4000 字）。</param>
+    /// <param name="contextToken">对方最近一条消息的 context_token。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <exception cref="ILinkException">请求失败或 ret 不为 0。</exception>
     public async Task SendTextAsync(string baseUrl, string token, string toUserId, string text, string? contextToken, CancellationToken cancellationToken)
     {
         var message = new

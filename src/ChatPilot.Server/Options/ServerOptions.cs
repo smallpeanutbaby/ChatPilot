@@ -5,6 +5,7 @@ namespace ChatPilot.Server.Options;
 /// <summary>服务器配置，对应 appsettings.json 的 <c>ChatPilot</c> 节，也可以用环境变量 <c>ChatPilot__Port</c> 这种形式覆盖。</summary>
 public sealed class ServerOptions
 {
+    /// <summary>配置节的名字。</summary>
     public const string Section = "ChatPilot";
 
     /// <summary>数据目录（状态文件、证书、登录二维码）。默认 <c>~/.chatpilot/server</c>。</summary>
@@ -13,15 +14,19 @@ public sealed class ServerOptions
     /// <summary>监听地址。不开 TLS 时必须是回环地址。</summary>
     public string ListenAddress { get; set; } = "0.0.0.0";
 
+    /// <summary>监听端口；0 表示随机分配（测试用）。</summary>
     public int Port { get; set; } = 8443;
 
     /// <summary>节点用来连接的公网地址，例如 <c>https://example.com:8443</c>，会写进 /pair 的提示里。</summary>
     public string? PublicUrl { get; set; }
 
+    /// <summary>TLS 设置。</summary>
     public TlsOptions Tls { get; set; } = new();
 
+    /// <summary>微信通道设置。</summary>
     public WeChatOptions WeChat { get; set; } = new();
 
+    /// <summary>本机测试通道设置。</summary>
     public DevChannelOptions DevChannel { get; set; } = new();
 
     /// <summary>等节点返回结果的时间（秒）。</summary>
@@ -30,12 +35,14 @@ public sealed class ServerOptions
     /// <summary>等节点启动 agent 的时间（秒）。</summary>
     public int StartAgentTimeoutSeconds { get; set; } = 120;
 
+    /// <summary>配对码有效期（分钟）。</summary>
     public int PairingCodeMinutes { get; set; } = 10;
 
+    /// <summary>数据目录的绝对路径。相对路径按程序所在目录解析（开机自启时工作目录通常是 /）。</summary>
     public string ResolvedDataDir =>
         string.IsNullOrWhiteSpace(DataDir)
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".chatpilot", "server")
-            : Path.GetFullPath(DataDir);
+            : Path.GetFullPath(DataDir, AppContext.BaseDirectory);
 
     /// <summary>启动前检查配置；有问题直接拒绝启动。</summary>
     public IReadOnlyList<string> Validate()
@@ -90,19 +97,23 @@ public sealed class ServerOptions
     }
 }
 
+/// <summary>TLS 设置。</summary>
 public sealed class TlsOptions
 {
     /// <summary>使用自签证书（首次启动自动生成，节点靠指纹校验）。</summary>
     public bool Enabled { get; set; } = true;
 }
 
+/// <summary>微信通道设置。</summary>
 public sealed class WeChatOptions
 {
+    /// <summary>是否启用微信通道。</summary>
     public bool Enabled { get; set; } = true;
 
     /// <summary>腾讯 iLink 接口地址。</summary>
     public string BaseUrl { get; set; } = "https://ilinkai.weixin.qq.com";
 
+    /// <summary>iLink 的 bot 类型（插件固定使用 3）。</summary>
     public string BotType { get; set; } = "3";
 
     /// <summary>兼容的 iLink 渠道协议版本（对应腾讯开源的 openclaw-weixin 插件版本）。</summary>
@@ -118,10 +129,12 @@ public sealed class WeChatOptions
     public int MaxChunks { get; set; } = 4;
 }
 
+/// <summary>本机测试通道设置。</summary>
 public sealed class DevChannelOptions
 {
     /// <summary>本机测试通道：只接受回环地址，必须带令牌。默认关闭。</summary>
     public bool Enabled { get; set; }
 
+    /// <summary>测试通道令牌，至少 16 位；请求时放在 <c>X-ChatPilot-Dev-Token</c> 请求头里。</summary>
     public string? Token { get; set; }
 }

@@ -9,6 +9,7 @@ public static class ReplyFormatter
     /// <summary>主动通知里正文的上限，留出余量让分段后不超过 4 条。</summary>
     private const int MaxEventTextChars = 14000;
 
+    /// <summary><c>/help</c> 的内容。</summary>
     public const string Help = """
         📖 ChatPilot 指令
 
@@ -31,6 +32,7 @@ public static class ReplyFormatter
         直接发文字（不带 / 或 @）会交给当前设备的管家。
         """;
 
+    /// <summary>agent 状态对应的图标。</summary>
     public static string StatusIcon(string status) => status switch
     {
         "working" => "⏳",
@@ -40,6 +42,7 @@ public static class ReplyFormatter
         _ => "❔",
     };
 
+    /// <summary>agent 状态的中文说明。</summary>
     public static string StatusText(string status) => status switch
     {
         "working" => "工作中",
@@ -64,6 +67,7 @@ public static class ReplyFormatter
         };
     }
 
+    /// <summary>失败结果的回复文字。</summary>
     public static string Failure(CommandOutcome outcome)
     {
         ArgumentNullException.ThrowIfNull(outcome);

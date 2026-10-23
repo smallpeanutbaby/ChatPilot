@@ -6,8 +6,13 @@ namespace ChatPilot.Shared.Text;
 /// <summary>把长文本切成多段，尽量在换行处切，不会把一个字（含 emoji）切成两半。</summary>
 public static class TextChunker
 {
+    /// <summary>内容被截断时追加在最后一段末尾的提示。</summary>
     public const string TruncatedNotice = "\n…（内容太长，后面的已省略）";
 
+    /// <summary>
+    /// 切成每段不超过 <paramref name="maxChunkChars"/> 个字符、最多 <paramref name="maxChunks"/> 段。
+    /// 放不下的部分截断并在最后一段末尾加提示；全是空白的段会被跳过。
+    /// </summary>
     public static IReadOnlyList<string> Split(string text, int maxChunkChars, int maxChunks)
     {
         ArgumentNullException.ThrowIfNull(text);
@@ -28,7 +33,11 @@ public static class TextChunker
 
             if (remaining.Length <= maxChunkChars)
             {
-                chunks.Add(remaining.ToString());
+                if (remaining.Trim().Length > 0)
+                {
+                    chunks.Add(remaining.ToString());
+                }
+
                 break;
             }
 
@@ -45,7 +54,12 @@ public static class TextChunker
                 cut = maxChunkChars;
             }
 
-            chunks.Add(remaining[..cut].TrimEnd().ToString());
+            var chunk = remaining[..cut].TrimEnd();
+            if (chunk.Length > 0)
+            {
+                chunks.Add(chunk.ToString());
+            }
+
             remaining = remaining[cut..].TrimStart('\n');
         }
 

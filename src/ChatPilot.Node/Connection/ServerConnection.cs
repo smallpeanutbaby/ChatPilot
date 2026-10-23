@@ -6,6 +6,9 @@ using Microsoft.Extensions.Logging;
 
 namespace ChatPilot.Node.Connection;
 
+/// <summary>同一个设备令牌在别处建立了新连接（通常是运行了两个节点），这个节点应当退出。</summary>
+public sealed class NodeReplacedException() : Exception("同一个设备在别处连上了服务器（可能运行了两个节点），这个节点退出");
+
 /// <summary>
 /// 节点到服务器的长连接：连接 → 握手 → 收指令 / 发结果和事件；断线后指数退避重连（1 秒到 60 秒）。
 /// </summary>
@@ -26,7 +29,10 @@ public sealed class ServerConnection(
     /// <summary>握手成功时触发（测试和日志用）。</summary>
     public event Action<WelcomeMessage>? Connected;
 
-    /// <summary>一直运行到取消。返回进程退出码：0 正常退出，2 设备令牌被拒绝。</summary>
+    /// <summary>
+    /// 一直运行到取消。返回进程退出码：0 正常退出（包括被另一个实例替换），2 设备令牌被拒绝。
+    /// 被替换时以 0 退出，开机自启工具就不会再把它拉起来和另一个实例互相顶替。
+    /// </summary>
     public async Task<int> RunAsync(CancellationToken cancellationToken)
     {
         var backoff = InitialBackoff;
@@ -48,6 +54,11 @@ public sealed class ServerConnection(
             {
                 logger.LogError("{Message}", ex.Message);
                 return 2;
+            }
+            catch (NodeReplacedException ex)
+            {
+                logger.LogError("{Message}", ex.Message);
+                return 0;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -108,6 +119,13 @@ public sealed class ServerConnection(
                 {
                     message = await WebSocketMessaging.ReceiveAsync(socket, ProtocolInfo.MaxFrameBytes, session.Token).ConfigureAwait(false);
                 }
+                catch (WireProtocolException ex) when (UnsupportedCommandId(ex.Payload) is { } unsupportedId)
+                {
+                    // 服务器比节点新、发来了不认识的指令：单独回错误，不断开连接。
+                    await SendResultAsync(socket, sendLock, unsupportedId,
+                        CommandOutcome.Failure(ErrorCodes.InvalidArgument, "节点不支持这个指令，请升级节点"), session.Token).ConfigureAwait(false);
+                    continue;
+                }
                 catch (WireProtocolException ex)
                 {
                     logger.LogWarning("服务器消息不合规：{Message}", ex.Message);
@@ -117,6 +135,11 @@ public sealed class ServerConnection(
 
                 if (message is null)
                 {
+                    if (socket.CloseStatusDescription == CloseReasons.Replaced)
+                    {
+                        throw new NodeReplacedException();
+                    }
+
                     await WebSocketMessaging.CloseQuietlyAsync(socket, WebSocketCloseStatus.NormalClosure, "bye").ConfigureAwait(false);
                     return;
                 }
@@ -142,6 +165,33 @@ public sealed class ServerConnection(
         {
             await session.CancelAsync().ConfigureAwait(false);
             await Task.WhenAll(handlers.Append(pump)).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// 如果无法解析的消息是一条结构正常、只是 op 不认识的指令，返回它的 id；否则返回 null。
+    /// </summary>
+    internal static string? UnsupportedCommandId(byte[]? payload)
+    {
+        if (payload is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(payload);
+            var root = document.RootElement;
+            return root.ValueKind == System.Text.Json.JsonValueKind.Object
+                && root.TryGetProperty("type", out var type) && type.ValueKind == System.Text.Json.JsonValueKind.String && type.GetString() == "command"
+                && root.TryGetProperty("id", out var id) && id.ValueKind == System.Text.Json.JsonValueKind.String
+                && id.GetString() is { Length: > 0 and <= 64 } value
+                    ? value
+                    : null;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
         }
     }
 

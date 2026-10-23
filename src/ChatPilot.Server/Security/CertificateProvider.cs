@@ -13,6 +13,7 @@ public sealed class CertificateProvider : IDisposable
     private readonly Lazy<X509Certificate2> _certificate;
     private readonly ILogger<CertificateProvider> _logger;
 
+    /// <summary>证书在第一次用到时才加载或生成。</summary>
     public CertificateProvider(IOptions<ServerOptions> options, ILogger<CertificateProvider> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -21,10 +22,13 @@ public sealed class CertificateProvider : IDisposable
         _certificate = new Lazy<X509Certificate2>(() => LoadOrCreate(path), LazyThreadSafetyMode.ExecutionAndPublication);
     }
 
+    /// <summary>服务器证书（含私钥）。</summary>
     public X509Certificate2 Certificate => _certificate.Value;
 
+    /// <summary>证书指纹，节点配对时要用。</summary>
     public string Fingerprint => CertificatePin.Compute(Certificate);
 
+    /// <summary>释放证书。</summary>
     public void Dispose()
     {
         if (_certificate.IsValueCreated)
@@ -66,9 +70,12 @@ public sealed class CertificateProvider : IDisposable
 /// <summary>/pair 提示里要用的服务器信息。</summary>
 public sealed class ServerIdentity(IOptions<ServerOptions> options, CertificateProvider certificates)
 {
+    /// <summary>是否开启了 TLS。</summary>
     public bool TlsEnabled => options.Value.Tls.Enabled;
 
+    /// <summary>证书指纹；没开 TLS 时为 null。</summary>
     public string? Fingerprint => TlsEnabled ? certificates.Fingerprint : null;
 
+    /// <summary>配置的公网地址；没配置时为 null。</summary>
     public string? PublicUrl => options.Value.PublicUrl;
 }

@@ -9,6 +9,7 @@ using ChatPilot.Tests.Support;
 
 namespace ChatPilot.Tests.Shared;
 
+/// <summary>协议消息的序列化（S-09）：往返一致、未知类型和缺字段的消息被拒绝。</summary>
 public class ProtocolTests
 {
     public static TheoryData<WireMessage> Messages => new()
@@ -43,7 +44,7 @@ public class ProtocolTests
         var json = ProtocolJson.Serialize(new CommandMessage("1", new StartAgentCommand("/x", "claude", null, null)));
         Assert.Contains("\"type\":\"command\"", json, StringComparison.Ordinal);
         Assert.Contains("\"op\":\"start_agent\"", json, StringComparison.Ordinal);
-        Assert.DoesNotContain("initial_prompt", json, StringComparison.Ordinal);
+        Assert.Contains("\"initial_prompt\":null", json, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -51,6 +52,9 @@ public class ProtocolTests
     [InlineData("""{"type":"exec","cmd":"id"}""")]
     [InlineData("""{"id":"1"}""")]
     [InlineData("not json")]
+    [InlineData("""{"type":"result","outcome":{"ok":true}}""")]
+    [InlineData("""{"type":"result","id":null,"outcome":{"ok":true}}""")]
+    [InlineData("""{"type":"hello","protocol_version":1}""")]
     [InlineData("""{"type":"command","id":"1","command":{"op":"prompt","target":"x","text":"y"},"x":""" + "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]" + "}")]
     public void Unknown_or_malformed_messages_are_rejected(string json)
     {
@@ -59,6 +63,7 @@ public class ProtocolTests
     }
 }
 
+/// <summary>输入校验规则：agent 名、pane ID、设备名、按键白名单。</summary>
 public class ValidationTests
 {
     [Theory]
@@ -70,6 +75,19 @@ public class ValidationTests
     [InlineData("a b", false)]
     [InlineData("abcdefghijabcdefghijabcdefghijabc", false)]
     public void Agent_names_follow_herdr_rules(string name, bool valid) => Assert.Equal(valid, Validation.IsAgentName(name));
+
+    [Theory]
+    [InlineData("tideq\n")]
+    [InlineData("w1:p1\n")]
+    [InlineData("mac\n")]
+    public void Trailing_newline_does_not_bypass_validation(string value)
+    {
+        // 审查 #9：.NET 的 $ 会匹配结尾换行前的位置。
+        Assert.False(Validation.IsAgentName(value));
+        Assert.False(Validation.IsPaneId(value));
+        Assert.False(Validation.IsDeviceName(value));
+        Assert.False(Validation.IsAgentTarget(value));
+    }
 
     [Theory]
     [InlineData("w1:p2", true)]
@@ -99,6 +117,7 @@ public class ValidationTests
     public void Only_whitelisted_keys_are_allowed(string key, bool allowed) => Assert.Equal(allowed, Validation.IsAllowedKey(key));
 }
 
+/// <summary>长文本分段（F-15）：最多 4 段、不拆 emoji、不产生空段。</summary>
 public class TextChunkerTests
 {
     [Fact]
@@ -126,6 +145,16 @@ public class TextChunkerTests
     }
 
     [Fact]
+    public void Whitespace_runs_never_produce_empty_chunks_or_lose_content()
+    {
+        // 审查 #13：5000 个空格后面跟一个 x，以前会产生空消息并丢掉 x。
+        var chunks = TextChunker.Split(new string(' ', 5000) + "x", 4000, 4);
+        Assert.All(chunks, c => Assert.False(string.IsNullOrWhiteSpace(c)));
+        Assert.EndsWith("x", chunks[^1], StringComparison.Ordinal);
+        Assert.Empty(TextChunker.Split("   \n\n   ", 100, 4));
+    }
+
+    [Fact]
     public void Text_exactly_at_limit_is_not_truncated()
     {
         var text = new string('x', 8000);
@@ -134,6 +163,7 @@ public class TextChunkerTests
     }
 }
 
+/// <summary>证书指纹比较（S-06）。</summary>
 public class CertificatePinTests
 {
     [Fact]
@@ -158,8 +188,27 @@ public class CertificatePinTests
     }
 }
 
+/// <summary>私密文件写入（S-14）：权限 600、原子替换、不改动已有目录的权限。</summary>
 public class SecureFileTests
 {
+    [Fact]
+    public void Existing_directories_keep_their_permissions()
+    {
+        // 审查 #17：--config ~/node.json 时不能把用户主目录改成 700。
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var temp = new TempDirectory();
+        var shared = temp.CreateDirectory("shared");
+        const UnixFileMode mode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute;
+        File.SetUnixFileMode(shared, mode);
+        SecureFile.WriteAllText(Path.Combine(shared, "node.json"), "{}");
+        Assert.Equal(mode, File.GetUnixFileMode(shared));
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(Path.Combine(shared, "node.json")));
+    }
+
     [Fact]
     public void Files_are_written_atomically_with_owner_only_permissions()
     {

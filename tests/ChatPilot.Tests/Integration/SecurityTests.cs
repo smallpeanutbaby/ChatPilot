@@ -190,13 +190,8 @@ public sealed class SecurityTests : IAsyncLifetime
     public async Task Disk_write_failures_during_disconnect_do_not_crash_the_server()
     {
         // 回归：设备断开时写"最后在线时间"失败，曾经导致整个进程崩溃。
-        // 用同名目录占住 state.json，让原子替换必然失败（改目录权限没用：写入前会把目录重设为 700）。
         var node = await NodeHarness.PairAndStartAsync(_factory, "mac");
-        var statePath = _factory.Services.GetRequiredService<StateStore>().FilePath;
-        var backup = statePath + ".bak";
-        File.Move(statePath, backup);
-        Directory.CreateDirectory(statePath);
-        try
+        await using (await StateFileBlocker.BlockAsync(_factory.Services.GetRequiredService<StateStore>().FilePath))
         {
             await node.DisposeAsync();
             await DevChat.EventuallyAsync(
@@ -204,11 +199,6 @@ public sealed class SecurityTests : IAsyncLifetime
                 "写失败应该只记一条警告");
             Assert.Contains("⚪ mac", await DevChat.SendAsync(_chat, "/devices"), StringComparison.Ordinal);
             Assert.Contains("ChatPilot 指令", await DevChat.SendAsync(_chat, "/help"), StringComparison.Ordinal);
-        }
-        finally
-        {
-            Directory.Delete(statePath, recursive: true);
-            File.Move(backup, statePath);
         }
     }
 

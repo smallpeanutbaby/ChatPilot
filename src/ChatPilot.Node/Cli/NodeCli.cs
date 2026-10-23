@@ -32,6 +32,7 @@ public static class NodeCli
           --config <路径>  配置文件，默认 ~/.chatpilot/node.json（也可用环境变量 CHATPILOT_NODE_CONFIG）
         """;
 
+    /// <summary>运行节点命令行，返回进程退出码：0 成功，1 出错，2 设备令牌被拒绝。</summary>
     public static async Task<int> RunAsync(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
@@ -53,7 +54,8 @@ public static class NodeCli
                 _ => Fail($"不认识的命令：{cli.Command}\n\n{Usage}"),
             };
         }
-        catch (Exception ex) when (ex is PairingException or FileNotFoundException or InvalidDataException or IOException)
+        catch (Exception ex) when (ex is PairingException or FileNotFoundException or InvalidDataException or IOException
+            or UnauthorizedAccessException or System.Text.Json.JsonException)
         {
             return Fail(ex.Message);
         }
@@ -109,15 +111,16 @@ public static class NodeCli
             HerdrSession = cli.Get("session"),
             AllowedRoots = roots,
         };
+        // reclaude 保持用命令名：它在新终端里运行，用户的 shell 能找到；写绝对路径遇到空格反而会出错。
         config.DefaultAgentKind = cli.Get("kind") ?? (FindInPath("reclaude") is not null ? "reclaude" : "claude");
-        if (config.Launchers.TryGetValue("reclaude", out var reclaude) && FindInPath("reclaude") is { } reclaudePath)
-        {
-            reclaude.Command = reclaudePath;
-        }
 
-        if (!config.IsKindAvailable(config.DefaultAgentKind))
+        // 配对码只能用一次，所以先把配置校验完（用占位的设备信息），再去配对。
+        config.DeviceId = "pending";
+        config.Token = "pending";
+        var preflight = config.Validate();
+        if (preflight.Count > 0)
         {
-            return Fail($"不支持的类型 {config.DefaultAgentKind}。可用：{string.Join("、", config.AvailableKinds())}");
+            return Fail("配置有问题：\n- " + string.Join("\n- ", preflight));
         }
 
         using var handler = PinnedTransport.CreateHttpHandler(fingerprint);
@@ -224,7 +227,8 @@ public static class NodeCli
 
         foreach (var (kind, launcher) in config.Launchers)
         {
-            var command = launcher.Command.Split(' ', 2)[0];
+            // 启动命令可能带参数；整条命令本身是个存在的文件时按文件判断，否则取第一个词。
+            var command = File.Exists(launcher.Command) ? launcher.Command : launcher.Command.Split(' ', 2)[0];
             var found = Path.IsPathFullyQualified(command) ? File.Exists(command) : FindInPath(command) is not null;
             Console.WriteLine(found ? $"✅ 类型 {kind}：{launcher.Command}" : $"⚠️ 类型 {kind}：找不到 {command}");
         }
@@ -280,9 +284,10 @@ public static class NodeCli
         return Validation.IsDeviceName(name) ? name : "device";
     }
 
+    /// <summary>在 PATH 里找可执行文件。Windows 上只认 .exe：.cmd / .bat 会经过 cmd.exe，参数不安全。</summary>
     internal static string? FindInPath(string command)
     {
-        var names = OperatingSystem.IsWindows() ? new[] { command + ".exe", command + ".cmd", command } : [command];
+        var names = OperatingSystem.IsWindows() ? new[] { command + ".exe" } : [command];
         var path = Environment.GetEnvironmentVariable("PATH") ?? "";
         foreach (var directory in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
         {

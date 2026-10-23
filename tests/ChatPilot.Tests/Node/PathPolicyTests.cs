@@ -39,6 +39,16 @@ public sealed class PathPolicyTests : IDisposable
     }
 
     [Fact]
+    public void Outside_paths_are_rejected_before_touching_the_disk()
+    {
+        // 审查 #8：白名单外不存在的目录也只说"不在允许的目录内"，不泄露它是否存在。
+        Assert.False(_policy.TryResolve(Path.Combine(_outside, "does-not-exist"), out _, out var error));
+        Assert.Contains("不在允许的目录内", error, StringComparison.Ordinal);
+        Assert.False(_policy.TryResolve("/net/attacker-host/share", out _, out var autofs));
+        Assert.Contains("不在允许的目录内", autofs, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Rejects_dot_dot_traversal()
     {
         var sneaky = Path.Combine(_allowed, "project", "..", "..", "outside");

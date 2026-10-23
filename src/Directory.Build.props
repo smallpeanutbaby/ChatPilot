@@ -1,0 +1,13 @@
+<Project>
+  <!-- 继承仓库根目录的统一设置。 -->
+  <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))" />
+
+  <PropertyGroup>
+    <!-- 源码项目强制要求公开成员都有 XML 文档注释（CS1591 缺注释会因为"警告视为错误"而编译失败）。 -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
+    <!-- 文档文件只用于编译检查，不放进打包产物。 -->
+    <PublishDocumentationFile>false</PublishDocumentationFile>
+    <PublishReferencesDocumentationFiles>false</PublishReferencesDocumentationFiles>
+  </PropertyGroup>
+</Project>

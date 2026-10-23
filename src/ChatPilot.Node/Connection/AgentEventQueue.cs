@@ -13,8 +13,10 @@ public sealed class AgentEventQueue(ILogger<AgentEventQueue> logger) : IAgentEve
     private readonly Channel<AgentEvent> _channel = Channel.CreateBounded<AgentEvent>(
         new BoundedChannelOptions(Capacity) { FullMode = BoundedChannelFullMode.Wait, SingleReader = true });
 
+    /// <summary>连接层从这里取事件发送；只能有一个读取方。</summary>
     public ChannelReader<AgentEvent> Reader => _channel.Reader;
 
+    /// <inheritdoc />
     public void Publish(AgentEvent agentEvent)
     {
         if (!_channel.Writer.TryWrite(agentEvent))

@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ChatPilot.Tests.Node;
 
+/// <summary>节点执行指令（F-10 到 F-21，S-07、S-10、S-11），herdr 用模拟的。</summary>
 public sealed class CommandExecutorTests : IAsyncDisposable
 {
     private readonly TempDirectory _root = new();
@@ -23,7 +24,7 @@ public sealed class CommandExecutorTests : IAsyncDisposable
         _config = new NodeConfig { AllowedRoots = [_root.Path], AgentStartTimeoutSeconds = 10 };
         var client = new HerdrClient(_herdr, "herdr", null, TimeSpan.FromSeconds(5));
         var replies = new ReplyService(client, _config, NullLogger<ReplyService>.Instance);
-        _tracker = new PromptTracker(client, replies, _events, _config, NullLogger<PromptTracker>.Instance);
+        _tracker = new PromptTracker(client, replies, _events, _config, NullLogger<PromptTracker>.Instance, initialPromptGrace: TimeSpan.FromMilliseconds(50), activityTimeout: TimeSpan.FromSeconds(1));
         _executor = new CommandExecutor(client, new PathPolicy(_config.AllowedRoots), _tracker, replies, _config, NullLogger<CommandExecutor>.Instance);
     }
 
@@ -56,7 +57,77 @@ public sealed class CommandExecutorTests : IAsyncDisposable
         var ev = await _events.WaitAsync();
         Assert.Equal(AgentEventKind.Completed, ev.Kind);
         Assert.Equal("收到", ev.Text);
-        Assert.Contains(_herdr.CallsStartingWith("agent", "prompt"), c => c.Contains("只回复：收到") && c.Contains("--wait"));
+        Assert.Contains(_herdr.CallsStartingWith("agent", "prompt"), c => c.Contains("只回复：收到") && !c.Contains("--wait"));
+        Assert.NotEmpty(_herdr.CallsStartingWith("agent", "wait"));
+    }
+
+    [Fact]
+    public async Task Completion_is_reported_even_when_reading_the_reply_fails()
+    {
+        // 审查 #2：整理回复失败不能吞掉通知。
+        var agent = _herdr.AddAgent("tideq", "TideQ");
+        _herdr.ReadError = "timeout";
+        await _executor.ExecuteAsync(new PromptCommand(agent.PaneId, "hi"), CancellationToken.None);
+        var ev = await _events.WaitAsync();
+        Assert.Equal(AgentEventKind.Completed, ev.Kind);
+        Assert.Contains("/read", ev.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Blocked_is_reported_even_when_reading_the_screen_fails()
+    {
+        var agent = _herdr.AddAgent("tideq", "TideQ");
+        _herdr.StatusAfterPrompt = "blocked";
+        _herdr.ReadError = "timeout";
+        await _executor.ExecuteAsync(new PromptCommand(agent.PaneId, "删掉 build"), CancellationToken.None);
+        var ev = await _events.WaitAsync();
+        Assert.Equal(AgentEventKind.Blocked, ev.Kind);
+        Assert.Contains("读取屏幕失败", ev.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task One_watcher_per_agent_so_back_to_back_prompts_report_once()
+    {
+        // 审查 #6：同一个 agent 不会同时挂多个后台等待，也不会重复通知。
+        var agent = _herdr.AddAgent("tideq", "TideQ");
+        _herdr.PromptDelay = TimeSpan.FromMilliseconds(500);
+        Assert.True((await _executor.ExecuteAsync(new PromptCommand(agent.PaneId, "一"), CancellationToken.None)).Ok);
+        Assert.True((await _executor.ExecuteAsync(new PromptCommand(agent.PaneId, "二"), CancellationToken.None)).Ok);
+        await _events.WaitAsync();
+        await Task.Delay(800);
+        Assert.Single(_events.Received);
+    }
+
+    [Fact]
+    public async Task Failed_start_closes_the_new_workspace()
+    {
+        // 审查 #10：启动失败不能留下半启动的工作区。
+        _herdr.StartError = "boom";
+        var outcome = await _executor.ExecuteAsync(new StartAgentCommand(_root.Path, "claude", "x", null), CancellationToken.None);
+        Assert.False(outcome.Ok);
+        Assert.Single(_herdr.CallsStartingWith("workspace", "close"));
+    }
+
+    [Fact]
+    public async Task Confirming_with_keys_keeps_tracking_like_yes()
+    {
+        var agent = _herdr.AddAgent("tideq", "TideQ", "blocked");
+        await _executor.ExecuteAsync(new SendKeysCommand(agent.PaneId, ["down", "enter"]), CancellationToken.None);
+        agent.Status = "working";
+        await Task.Delay(700);
+        agent.Status = "idle";
+        var ev = await _events.WaitAsync();
+        Assert.Equal(AgentEventKind.Completed, ev.Kind);
+    }
+
+    [Fact]
+    public async Task Panes_without_a_recognized_agent_are_not_prompted()
+    {
+        var agent = _herdr.AddAgent("tideq", "TideQ");
+        agent.Kind = null;
+        var outcome = await _executor.ExecuteAsync(new PromptCommand(agent.PaneId, "hi"), CancellationToken.None);
+        Assert.Equal(ErrorCodes.NotFound, outcome.Error?.Code);
+        Assert.Empty(_herdr.CallsStartingWith("agent", "prompt"));
     }
 
     [Fact]
@@ -188,6 +259,18 @@ public sealed class CommandExecutorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Swallowed_initial_prompt_is_resent()
+    {
+        // 真实验收发现：刚确认完"信任此目录"时发的初始说明会被 Claude 吞掉，要重发。
+        _herdr.SwallowPrompts = 1;
+        var outcome = await _executor.ExecuteAsync(new StartAgentCommand(_root.Path, "claude", "butler", "你是管家"), CancellationToken.None);
+        Assert.True(Assert.IsType<AgentStartedData>(outcome.Data).Ready);
+        var ev = await _events.WaitAsync();
+        Assert.Equal(AgentEventKind.Completed, ev.Kind);
+        Assert.Equal(2, _herdr.CallsStartingWith("agent", "prompt").Count(c => c[3] == "你是管家"));
+    }
+
+    [Fact]
     public async Task Start_agent_refuses_paths_outside_whitelist_and_unknown_kinds()
     {
         // S-07 / S-10
@@ -259,6 +342,7 @@ public sealed class CommandExecutorTests : IAsyncDisposable
     }
 }
 
+/// <summary>节点配置校验和保存（S-06、S-14）。</summary>
 public class NodeConfigTests
 {
     private static NodeConfig Valid() => new()

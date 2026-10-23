@@ -2,28 +2,46 @@ namespace ChatPilot.Node.Execution;
 
 /// <summary>
 /// 目录白名单：远程只能在这些目录（含子目录）里开工作区。
-/// 先展开 <c>~</c>、规范化 <c>..</c>，再逐级解析符号链接，用真实路径比较，防止路径穿越和链接跳出。
 /// </summary>
+/// <remarks>
+/// 检查分两步：
+/// <list type="number">
+/// <item>纯字符串检查（展开 <c>~</c>、规范化 <c>..</c>）：不在白名单内的路径直接拒绝，<b>不访问文件系统</b>，
+/// 避免访问 <c>\host\share</c>（Windows 会带着用户凭据连 SMB）或 <c>/net/host</c>（macOS 自动挂载），
+/// 也不泄露白名单外某个目录是否存在。</item>
+/// <item>逐级解析符号链接得到真实路径，再检查一次，防止通过链接跳出白名单。</item>
+/// </list>
+/// </remarks>
 public sealed class PathPolicy
 {
     private const int MaxLinkHops = 40;
 
     private readonly IReadOnlyList<string> _roots;
+    private readonly IReadOnlyList<string> _lexicalRoots;
 
+    /// <summary>根据配置的允许目录创建白名单；不存在的目录会被忽略。</summary>
     public PathPolicy(IEnumerable<string> roots)
     {
         ArgumentNullException.ThrowIfNull(roots);
-        _roots = roots
+        var configured = roots
             .Select(ExpandHome)
-            .Where(r => Path.IsPathFullyQualified(r) && Directory.Exists(r))
-            .Select(r => ResolveRealPath(Path.GetFullPath(r)))
+            .Where(Path.IsPathFullyQualified)
+            .Select(Path.GetFullPath)
+            .ToList();
+        _roots = configured
+            .Where(Directory.Exists)
+            .Select(ResolveRealPath)
             .Distinct(PathComparer)
             .ToList();
+
+        // 字符串检查同时认配置里写的路径和解析后的真实路径（例如 /tmp 和 /private/tmp）。
+        _lexicalRoots = configured.Concat(_roots).Distinct(PathComparer).ToList();
     }
 
     /// <summary>白名单里第一个存在的目录；没有时为 null。</summary>
     public string? DefaultDirectory => _roots.Count > 0 ? _roots[0] : null;
 
+    /// <summary>解析符号链接后、实际存在的允许目录。</summary>
     public IReadOnlyList<string> Roots => _roots;
 
     /// <summary>macOS（默认）和 Windows 的文件系统不区分大小写。</summary>
@@ -56,10 +74,28 @@ public sealed class PathPolicy
             return false;
         }
 
+        string full;
+        try
+        {
+            full = Path.GetFullPath(expanded);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            error = "无法解析这个目录";
+            return false;
+        }
+
+        // 第一步：只看字符串，不碰文件系统。
+        if (!_lexicalRoots.Any(root => IsWithin(full, root)))
+        {
+            error = OutsideMessage();
+            return false;
+        }
+
+        // 第二步：确认存在，解析符号链接后再查一次。
         string real;
         try
         {
-            var full = Path.GetFullPath(expanded);
             if (!Directory.Exists(full))
             {
                 error = "目录不存在";
@@ -76,9 +112,7 @@ public sealed class PathPolicy
 
         if (!_roots.Any(root => IsWithin(real, root)))
         {
-            error = _roots.Count == 0
-                ? "这台设备没有配置允许的目录（AllowedRoots）"
-                : "不在允许的目录内。允许的目录：" + string.Join("、", _roots);
+            error = OutsideMessage();
             return false;
         }
 
@@ -87,6 +121,12 @@ public sealed class PathPolicy
         return true;
     }
 
+    private string OutsideMessage() =>
+        _roots.Count == 0
+            ? "这台设备没有配置允许的目录（AllowedRoots）"
+            : "不在允许的目录内。允许的目录：" + string.Join("、", _roots);
+
+    /// <summary>把开头的 <c>~</c> 换成用户主目录（不支持 <c>~user</c> 写法）。</summary>
     public static string ExpandHome(string path)
     {
         ArgumentNullException.ThrowIfNull(path);

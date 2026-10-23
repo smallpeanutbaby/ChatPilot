@@ -4,6 +4,7 @@ using ChatPilot.Tests.Support;
 
 namespace ChatPilot.Tests.Node;
 
+/// <summary>从终端或会话记录提取最后一条回复（F-15、F-17），样例来自真实的 Claude Code 终端。</summary>
 public class ReplyExtractorTests
 {
     [Fact]
@@ -82,6 +83,7 @@ public class ReplyExtractorTests
     }
 }
 
+/// <summary>确认框导航（F-16）：选中不扩大权限的"Yes"，不把输入框当成确认框。</summary>
 public class ApprovalNavigatorTests
 {
     [Fact]
@@ -116,6 +118,40 @@ public class ApprovalNavigatorTests
     }
 
     [Fact]
+    public void Never_picks_an_option_that_escalates_permissions()
+    {
+        // 审查 #4：退出计划模式时第一个 Yes 是"自动接受修改"，应该选"手动确认"那个。
+        const string planMode = """
+         Would you like to proceed?
+         ❯ 1. Yes, and auto-accept edits
+           2. Yes, and manually approve edits
+           3. No, keep planning
+        """;
+        Assert.True(ApprovalNavigator.TryPlanApprove(planMode, out var plan, out _));
+        Assert.Equal(["down", "enter"], plan?.Keys);
+        Assert.Equal("2. Yes, and manually approve edits", plan?.OptionText);
+
+        const string onlyEscalating = """
+         Allow this tool?
+         ❯ 1. Yes, and don't ask again
+           2. Yes, allow all edits during this session
+           3. No
+        """;
+        Assert.False(ApprovalNavigator.TryPlanApprove(onlyEscalating, out _, out var error));
+        Assert.Contains("扩大权限", error, StringComparison.Ordinal);
+        Assert.Contains("\n1. Yes, and don't ask again\n", error, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(new[] { "1. Yes", "2. Yes, and don't ask again for rm", "3. No" }, 0)]
+    [InlineData(new[] { "No, exit", "Yes, I trust this folder" }, 1)]
+    [InlineData(new[] { "Yes, always", "Yes" }, 1)]
+    [InlineData(new[] { "允许，并且不再询问", "允许" }, 1)]
+    [InlineData(new[] { "Yes, skip permissions", "No" }, -1)]
+    public void Plain_yes_is_preferred(string[] options, int expected) =>
+        Assert.Equal(expected, ApprovalNavigator.PickApproveOption(options));
+
+    [Fact]
     public void Idle_input_box_is_not_mistaken_for_a_dialog()
     {
         Assert.False(ApprovalNavigator.TryPlanApprove(SampleScreens.IdleScreen, out _, out var error));
@@ -135,6 +171,7 @@ public class ApprovalNavigatorTests
     }
 }
 
+/// <summary>由目录名生成 agent 名字和工作区标签。</summary>
 public class AgentNamingTests
 {
     [Theory]
