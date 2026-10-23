@@ -9,10 +9,13 @@ namespace ChatPilot.Shared;
 /// </summary>
 public static partial class Validation
 {
-    /// <summary>herdr 内置支持的 agent 类型。</summary>
+    /// <summary>herdr 内置支持的 agent 类型（<c>herdr agent start --kind</c> 的取值，对照 herdr 0.9.4）。</summary>
     public static FrozenSet<string> BuiltInAgentKinds { get; } =
-        new[] { "claude", "codex", "cursor", "droid", "grok", "kimi", "opencode", "pi", "qwen" }
-            .ToFrozenSet(StringComparer.Ordinal);
+        new[]
+        {
+            "agy", "amp", "claude", "cline", "codex", "copilot", "cursor", "devin", "droid", "gemini", "grok", "hermes",
+            "kilo", "kimi", "kiro", "letta", "maki", "mastracode", "muse", "omp", "opencode", "pi", "qodercli", "qwen",
+        }.ToFrozenSet(StringComparer.Ordinal);
 
     /// <summary>
     /// 允许远程发送的按键：只够操作确认框、菜单和中断，不包含能输入任意文字的按键组合。

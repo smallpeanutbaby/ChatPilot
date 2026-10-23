@@ -15,8 +15,8 @@
 ```
 
 - **两个程序**：服务器（只部署一份）和节点（每台电脑一份）。电脑只往外连服务器，不开端口、不需要公网 IP。
-- **没有额外的 AI**：理解指令、写代码的都是你电脑上的 Claude Code；服务器只转发。
-- **claude 和 reclaude 都支持**：配对时检测到 reclaude 会把它设为默认，`/new` 时也可以指定。
+- **没有额外的 AI**：理解指令、写代码的都是你电脑上的 agent（Claude Code、Codex……）；服务器只转发。
+- **herdr 能管的 agent 都能用**：claude、reclaude、codex、pi、kimi、qwen、opencode 等，各自的支持程度见[支持的 agent](#支持的-agent)。配对时检测到 reclaude 会把它设为默认，`/new` 时也可以指定类型。
 - 设计和验收：[`docs/PLAN.md`](docs/PLAN.md) · [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) · [`docs/ACCEPTANCE-REPORT.md`](docs/ACCEPTANCE-REPORT.md) · 安全：[`docs/SECURITY.md`](docs/SECURITY.md)
 
 ## 手机上怎么用
@@ -26,7 +26,7 @@
 | `/devices` | 设备列表和在线状态 |
 | `/use 设备` | 切换默认设备 |
 | `/ls [设备]` | 列出 agent（带序号） |
-| `@目标 内容` | 把任务交给 agent，做完会推送 Claude 的回复 |
+| `@目标 内容` | 把任务交给 agent，做完会推送它的回复 |
 | `/read 目标 [行数]` | 看最近的终端输出 |
 | `/new [设备] 目录 [类型] [名字]` | 在允许的目录里新开工作区并启动 agent |
 | `/yes 目标` · `/no 目标` | 处理确认框：自动选中"这一次同意"的选项；"不再询问 / 全部允许"这类会扩大权限的选项不会自动选，会列出来让你用 `/keys` 自己选 |
@@ -37,6 +37,33 @@
 | `/pair [设备名]` · `/unpair 设备` | 配对 / 撤销设备 |
 
 **目标**可以是 `/ls` 里的序号、agent 名字、工作区名或 pane ID，前面加 `设备/` 指定设备，例如 `@mac/tideq 跑一下测试`。
+
+## 支持的 agent
+
+`/new` 能启动 herdr 0.9.4 支持的全部类型（agy、amp、claude、cline、codex、copilot、cursor、devin、droid、gemini、grok、hermes、kilo、kimi、kiro、letta、maki、mastracode、muse、omp、opencode、pi、qodercli、qwen），再加上 `launchers` 里自定义的（默认带 reclaude）。
+发任务、`/read`、`/keys`、改名、做完通知都直接走 herdr，不分类型。各类型的差别在两处：
+
+- **推送的回复**：能找到会话记录就读记录，内容完整准确；找不到就读终端。读终端时，Claude Code 和 Codex 能认出回复块，其他 agent 取这一轮指令之后的全部输出（可能夹着工具调用的输出）。
+- **`/yes`**：认得竖排选项列表里的选中标记（`❯ › → ▶ ▸ > ●` 和单选框 `(●)`），只选"这一次同意"。横排按钮（opencode / kilo 的 Allow once · Allow always · Reject）看不出选中的是哪个，不自动选，请用 `/keys`。
+
+| 类型 | 回复从哪里读 | 验证情况 |
+|---|---|---|
+| claude / reclaude | 会话记录：`~/.claude/projects`、`CLAUDE_CONFIG_DIR`、reclaude 各账号目录、配置的 `claudeProjectRoots` | macOS 真机验收；Windows 真机冒烟测试通过（`/new`、信任目录的 `/yes`、推送回复） |
+| codex | 会话记录：`$CODEX_HOME`（默认 `~/.codex`）下的 `sessions`、`archived_sessions` | Windows 真机冒烟测试通过（`/new`、推送回复）；`/yes` 只有测试样例，未在真机触发确认框 |
+| pi | 会话记录：herdr 直接给出路径 | Windows 真机冒烟测试通过；pi 默认没有确认框 |
+| kimi | 会话记录：`$KIMI_CODE_HOME`（默认 `~/.kimi-code`）下的 `sessions` | 本机真实会话核对；真机测试因套餐无权限未完成 |
+| qwen | 会话记录：`$QWEN_RUNTIME_DIR` / `$QWEN_HOME`（默认 `~/.qwen`）下的 `projects/*/chats` | 按 Qwen Code 0.26 发布包实现，未真机验证 |
+| opencode / kilo | SQLite 库：`$XDG_DATA_HOME`（默认 `~/.local/share`）下的 `opencode/opencode.db`、`kilo/kilo.db`，可用 `OPENCODE_DB` / `KILO_DB` 指定 | 按 opencode 1.19 / kilo 7.8 源码实现，未真机验证 |
+| droid | 会话记录：`$FACTORY_HOME_OVERRIDE`（默认用户主目录）下的 `.factory/sessions` | 按 Droid 0.248 发布包实现，未真机验证 |
+| cursor | 会话记录：`$CURSOR_DATA_DIR`（默认 `~/.cursor`）下的 `projects/*/agent-transcripts`；Cursor 会把思考过程接在回复正文后面，无法拆开 | 按 Cursor Agent CLI 发布包实现，未真机验证 |
+| copilot | 会话记录：`$COPILOT_HOME`（默认 `~/.copilot`）下的 `session-state` | 按 Copilot CLI 1.0.63 发布包实现，未真机验证 |
+| grok | 会话记录：`$GROK_HOME`（默认 `~/.grok`）下的 `sessions/*/<id>/updates.jsonl`；有用户报告 Windows 上不写这个文件，那时退回读终端 | 按官方文档实现，可信度中等，未真机验证 |
+| gemini | 终端（herdr 不上报它的会话） | 未真机验证 |
+| 其他类型 | 终端 | 未真机验证 |
+
+读会话记录需要 herdr 上报会话：装好对应的 herdr 集成，例如 `herdr integration install codex`，`herdr integration status` 可以查看哪些已装、哪些过期。
+
+**Windows 注意**：npm 装的 codex、kimi、pi 等是通过 `.ps1` 脚本启动的。如果 PowerShell 的执行策略没设置（默认禁止运行脚本），herdr 新开的终端里启动不了它们，`/new` 会报"timed out waiting for agent startup"。用户执行一次 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` 即可。
 
 ## 部署
 
@@ -117,7 +144,7 @@ dotnet run --project src/ChatPilot.Node -- run
 
 - **iLink 不是腾讯公开文档的 API**：协议参照腾讯开源的 openclaw-weixin 插件（MIT），腾讯修改或限制时需要跟着调整。
 - **微信不支持真正的主动推送**：ChatPilot 复用你最近一条消息的 context_token 发通知，长时间不说话后能否推送取决于腾讯。
-- **回复提取**：herdr 提供 Claude 会话记录时读记录；否则从终端界面提取最后一条回复。建议安装 herdr 的 Claude 集成：`herdr integration install claude`。
+- **回复提取**：能找到会话记录时读记录；否则从终端界面提取，准确度因 agent 而异（见[支持的 agent](#支持的-agent)）。会话记录格式是各 agent 的内部格式，agent 升级后可能需要跟着调整；读不了时会自动退回到读终端。
 - 节点或服务器重启时，正在等的任务不再推送结果，用 `/ls`、`/read` 查看。
 - 同一个设备令牌只能有一个节点在线：新启动的会把旧的顶掉，被顶掉的那个自动退出。
 - 消息按顺序一条一条处理，一条很慢的指令（比如 `/new`）会让后面的消息稍等。

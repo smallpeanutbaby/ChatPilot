@@ -96,7 +96,7 @@ public sealed class PromptTracker : IAsyncDisposable
             return CommandExecutor.MapHerdrError(ex);
         }
 
-        var watching = TryWatch(agent, token => FollowPromptAsync(agent, token));
+        var watching = TryWatch(agent, token => FollowPromptAsync(agent, text, token));
         return CommandOutcome.Success(new AckData(watching switch
         {
             WatchResult.Started or WatchResult.AlreadyWatching => "已发送",
@@ -137,12 +137,12 @@ public sealed class PromptTracker : IAsyncDisposable
             if (current.Status == AgentStatus.Blocked)
             {
                 // 又弹出了新的确认框。
-                await ReportSettledAsync(current, token).ConfigureAwait(false);
+                await ReportSettledAsync(current, prompt: null, token).ConfigureAwait(false);
                 return;
             }
 
             var settled = await _herdr.WaitAsync(agent.PaneId, SettledStates, WaitLimit, token).ConfigureAwait(false);
-            await ReportSettledAsync(settled ?? current, token).ConfigureAwait(false);
+            await ReportSettledAsync(settled ?? current, prompt: null, token).ConfigureAwait(false);
         });
     }
 
@@ -243,7 +243,7 @@ public sealed class PromptTracker : IAsyncDisposable
     }
 
     /// <summary>提交后：先确认 agent 开始干活，再等它停下并上报。</summary>
-    private async Task FollowPromptAsync(HerdrAgent before, CancellationToken cancellationToken)
+    private async Task FollowPromptAsync(HerdrAgent before, string prompt, CancellationToken cancellationToken)
     {
         var started = await WaitForActivityAsync(before, cancellationToken).ConfigureAwait(false);
         if (started is null)
@@ -252,16 +252,16 @@ public sealed class PromptTracker : IAsyncDisposable
             return;
         }
 
-        await FollowStartedAsync(started, cancellationToken).ConfigureAwait(false);
+        await FollowStartedAsync(started, prompt, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>agent 已经开始干活（或已经做完）：等它停下并上报。</summary>
-    private async Task FollowStartedAsync(HerdrAgent started, CancellationToken cancellationToken)
+    private async Task FollowStartedAsync(HerdrAgent started, string prompt, CancellationToken cancellationToken)
     {
         var settled = started.Status is AgentStatus.Idle or AgentStatus.Done or AgentStatus.Blocked
             ? started
             : await _herdr.WaitAsync(started.PaneId, SettledStates, WaitLimit, cancellationToken).ConfigureAwait(false);
-        await ReportSettledAsync(settled ?? started, cancellationToken).ConfigureAwait(false);
+        await ReportSettledAsync(settled ?? started, prompt, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -314,7 +314,7 @@ public sealed class PromptTracker : IAsyncDisposable
             await _herdr.PromptAsync(agent.PaneId, text, cancellationToken).ConfigureAwait(false);
             if (await WaitForActivityAsync(before, cancellationToken).ConfigureAwait(false) is { } started)
             {
-                await FollowStartedAsync(started, cancellationToken).ConfigureAwait(false);
+                await FollowStartedAsync(started, text, cancellationToken).ConfigureAwait(false);
                 return;
             }
 
@@ -326,7 +326,10 @@ public sealed class PromptTracker : IAsyncDisposable
     }
 
     /// <summary>上报 agent 停下的结果。读屏幕或提取回复失败时用提示文字代替，保证事件一定发出。</summary>
-    private async Task ReportSettledAsync(HerdrAgent agent, CancellationToken cancellationToken)
+    /// <param name="agent">停下来的 agent。</param>
+    /// <param name="prompt">这一轮交给它的文字；回应确认框后继续跟踪时不知道，为 null。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    private async Task ReportSettledAsync(HerdrAgent agent, string? prompt, CancellationToken cancellationToken)
     {
         var blocked = agent.Status == AgentStatus.Blocked;
         string text;
@@ -334,7 +337,7 @@ public sealed class PromptTracker : IAsyncDisposable
         {
             text = blocked
                 ? await _replies.GetScreenExcerptAsync(agent.PaneId, cancellationToken).ConfigureAwait(false)
-                : await _replies.GetLastReplyAsync(agent, cancellationToken).ConfigureAwait(false);
+                : await _replies.GetLastReplyAsync(agent, prompt, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is HerdrException or IOException or UnauthorizedAccessException or InvalidOperationException)
         {

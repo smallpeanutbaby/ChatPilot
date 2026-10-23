@@ -1,10 +1,9 @@
-using System.Text.Json;
 using ChatPilot.Node.Execution;
 using ChatPilot.Tests.Support;
 
 namespace ChatPilot.Tests.Node;
 
-/// <summary>从终端或会话记录提取最后一条回复（F-15、F-17），样例来自真实的 Claude Code 终端。</summary>
+/// <summary>从终端提取最后一条回复（F-15、F-17），样例来自真实的 Claude Code / Codex / pi 终端。</summary>
 public class ReplyExtractorTests
 {
     [Fact]
@@ -62,28 +61,66 @@ public class ReplyExtractorTests
     }
 
     [Fact]
-    public void Extracts_assistant_text_after_last_human_prompt_from_transcript()
+    public void Extracts_codex_reply_and_skips_tool_blocks_and_turn_footer()
     {
-        using var temp = new TempDirectory();
-        var path = temp.Combine("session.jsonl");
-        object[] entries =
-        [
-            new { type = "user", message = new { role = "user", content = "旧问题" } },
-            new { type = "assistant", message = new { role = "assistant", content = new object[] { new { type = "text", text = "旧回答" } } } },
-            new { type = "user", message = new { role = "user", content = new object[] { new { type = "text", text = "新问题" } } } },
-            new { type = "assistant", message = new { role = "assistant", content = new object[] { new { type = "text", text = "我先看看" }, new { type = "tool_use", name = "Read" } } } },
-            new { type = "user", message = new { role = "user", content = new object[] { new { type = "tool_result", content = "file" } } } },
-            new { type = "assistant", isSidechain = true, message = new { role = "assistant", content = new object[] { new { type = "text", text = "子任务的话" } } } },
-            new { type = "assistant", message = new { role = "assistant", content = new object[] { new { type = "text", text = "改好了" } } } },
-        ];
-        File.WriteAllLines(path, entries.Select(e => JsonSerializer.Serialize(e)).Append("{broken json"));
+        var reply = ReplyExtractor.FromTerminal(SampleScreens.CodexReply, 1000);
+        Assert.Equal("已修改：\n\n• 校验器移到 Domain/Validators，删除接口，调用方直接使用具体\n  类。\n\n全量 752 项测试通过；构建 0 错误。", reply);
+    }
 
-        Assert.Equal("我先看看\n\n改好了", ReplyExtractor.FromClaudeTranscript(path, 1000));
-        Assert.Null(ReplyExtractor.FromClaudeTranscript(temp.Combine("missing.jsonl"), 1000));
+    [Fact]
+    public void Codex_input_line_and_status_bar_are_cut_from_recent_content()
+    {
+        var recent = ReplyExtractor.RecentContent(SampleScreens.CodexReply, 3);
+        Assert.DoesNotContain("Ask Codex", recent, StringComparison.Ordinal);
+        Assert.DoesNotContain("for shortcuts", recent, StringComparison.Ordinal);
+        Assert.EndsWith("最新调整尚未推送。", recent, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Codex_option_list_is_not_mistaken_for_the_input_line()
+    {
+        // 确认框里的 › 1. Yes 和输入行一样在第 0 列，不能被当成输入框截掉，否则推给用户的屏幕摘要里看不到选项。
+        const string screen = """
+        • Ran rm -rf build
+
+          Would you like to run the following command?
+
+          $ rm -rf build
+
+        › 1. Yes, proceed (y)
+          2. Yes, and don't ask again for this command (a)
+          3. No, and tell Codex what to do differently (esc)
+
+          Press enter to confirm or esc to cancel
+        """;
+        Assert.Contains("3. No, and tell Codex", ReplyExtractor.ScreenExcerpt(screen), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Agents_without_markers_are_anchored_on_the_echoed_prompt()
+    {
+        // pi 没有输入 / 回复标记：用回显的提交文字定位这一轮，去掉统一缩进和底部输入区。
+        var reply = ReplyExtractor.FromTerminal(SampleScreens.PiReply, 1000, "帮我跑一下测试");
+        Assert.Equal("read tests/OrderTests.cs\n\n测试全部通过：\n- 29 项通过\n- 0 项失败", reply);
+        Assert.DoesNotContain("pi-lens", ReplyExtractor.ScreenExcerpt(SampleScreens.PiReply), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Multi_line_prompts_are_anchored_on_their_last_line()
+    {
+        const string screen = """
+        │ > 第一行要求
+        │   最后一行要求
+        ✦ 好的，已经处理完了。
+        ╭──────────────────────────────╮
+        │ >   Type your message        │
+        ╰──────────────────────────────╯
+        """;
+        Assert.Equal("✦ 好的，已经处理完了。", ReplyExtractor.FromTerminal(screen, 1000, "第一行要求\n最后一行要求\n"));
     }
 }
 
-/// <summary>确认框导航（F-16）：选中不扩大权限的"Yes"，不把输入框当成确认框。</summary>
+/// <summary>确认框导航（F-16）：认识各家 agent 的选中标记，选中不扩大权限的"同意"，不把输入框当成确认框。</summary>
 public class ApprovalNavigatorTests
 {
     [Fact]
@@ -150,6 +187,119 @@ public class ApprovalNavigatorTests
     [InlineData(new[] { "Yes, skip permissions", "No" }, -1)]
     public void Plain_yes_is_preferred(string[] options, int expected) =>
         Assert.Equal(expected, ApprovalNavigator.PickApproveOption(options));
+
+    [Theory]
+    [InlineData(new[] { "1. Allow once", "2. Allow for this session", "3. Always allow", "4. Deny" }, 0)]
+    [InlineData(new[] { "Approve for this session", "Approve once" }, 1)]
+    [InlineData(new[] { "Yes, allow always", "Yes, allow once" }, 1)]
+    [InlineData(new[] { "Always allow", "Allow", "Deny" }, 1)]
+    [InlineData(new[] { "Auto-run everything (shift+tab)", "Run (once) (y)", "Skip (esc or n)" }, 1)]
+    [InlineData(new[] { "Trust, always allow in this session", "Yes, single permission", "No (tab to edit)" }, 1)]
+    [InlineData(new[] { "Yes, proceed (y)", "Yes, and don't ask again for this command (a)" }, 0)]
+    public void Once_options_beat_session_wide_ones(string[] options, int expected) =>
+        Assert.Equal(expected, ApprovalNavigator.PickApproveOption(options));
+
+    [Fact]
+    public void Codex_cursor_is_recognised_and_composer_is_skipped()
+    {
+        const string screen = """
+          Would you like to run the following command?
+
+          $ rm -rf build
+
+        › 1. Yes, proceed (y)
+          2. Yes, and don't ask again for this command (a)
+          3. No, and tell Codex what to do differently (esc)
+
+          Press enter to confirm or esc to cancel
+        """;
+        Assert.True(ApprovalNavigator.TryPlanApprove(screen, out var plan, out _));
+        Assert.Equal(["enter"], plan?.Keys);
+        Assert.Equal("1. Yes, proceed (y)", plan?.OptionText);
+
+        Assert.False(ApprovalNavigator.TryPlanApprove(SampleScreens.CodexReply, out _, out var error));
+        Assert.Contains("没有找到确认框", error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Cursor_agent_arrow_picks_run_once()
+    {
+        const string screen = """
+          Run this command?
+          rm -rf build
+          → Run (once) (y)
+            Add Shell(rm) to allowlist? (tab)
+            Auto-run everything (shift+tab)
+            Skip (esc or n)
+        """;
+        Assert.True(ApprovalNavigator.TryPlanApprove(screen, out var plan, out _));
+        Assert.Equal(["enter"], plan?.Keys);
+        Assert.Equal("Run (once) (y)", plan?.OptionText);
+    }
+
+    [Fact]
+    public void Kimi_triangle_cursor_moves_off_the_session_wide_option()
+    {
+        const string screen = """
+          Run this command?
+            1. Approve once
+          ▶ 2. Approve for this session
+            3. Reject
+          ↵ confirm  1/2/3 choose
+        """;
+        Assert.True(ApprovalNavigator.TryPlanApprove(screen, out var plan, out _));
+        Assert.Equal(["up", "enter"], plan?.Keys);
+        Assert.Equal("1. Approve once", plan?.OptionText);
+    }
+
+    [Fact]
+    public void Gemini_boxed_radio_dialog_is_understood()
+    {
+        const string screen = """
+        ╭──────────────────────────────────────╮
+        │ ?  Shell rm -rf build                 │
+        │                                       │
+        │ Allow execution?                      │
+        │                                       │
+        │ ● 1. Yes, allow once                  │
+        │   2. Yes, allow always ...            │
+        │   3. No, suggest changes (esc)        │
+        ╰──────────────────────────────────────╯
+        """;
+        Assert.True(ApprovalNavigator.TryPlanApprove(screen, out var plan, out _));
+        Assert.Equal(["enter"], plan?.Keys);
+        Assert.Equal("1. Yes, allow once", plan?.OptionText);
+    }
+
+    [Fact]
+    public void Grok_radio_buttons_are_understood()
+    {
+        const string screen = """
+          Allow command: rm -rf build
+          ┃ 1 (○) Yes, always allow rm
+          ┃ 2 (●) No, reject
+          ┃ 3 (○) Yes, proceed
+          1/3:select · Ctrl+o:yolo · Ctrl+c:cancel
+        """;
+        Assert.True(ApprovalNavigator.TryPlanApprove(screen, out var plan, out _));
+        Assert.Equal(["down", "enter"], plan?.Keys);
+        Assert.Equal("3. Yes, proceed", plan?.OptionText);
+    }
+
+    [Fact]
+    public void Droid_chevron_cursor_is_understood()
+    {
+        const string screen = """
+          Execute command: rm -rf build
+            No, cancel
+          > Yes, allow
+            Yes, always allow
+          Use ↑↓ to navigate, Enter to select, Esc to cancel
+        """;
+        Assert.True(ApprovalNavigator.TryPlanApprove(screen, out var plan, out _));
+        Assert.Equal(["enter"], plan?.Keys);
+        Assert.Equal("Yes, allow", plan?.OptionText);
+    }
 
     [Fact]
     public void Idle_input_box_is_not_mistaken_for_a_dialog()
