@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ChatPilot 节点：macOS 登录后自动启动（LaunchAgent，以当前用户身份运行，能访问你的 herdr）。
+
+  安装：
+    1. 把 chatpilot-node 放到 /usr/local/bin/（或改下面的路径），先运行一次 pair 完成配对
+    2. 把下面的 YOUR_NAME 换成你的用户名
+    3. cp com.chatpilot.node.plist ~/Library/LaunchAgents/
+    4. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.chatpilot.node.plist
+  查看日志：tail -f ~/Library/Logs/chatpilot-node.log
+  停止：launchctl bootout gui/$(id -u)/com.chatpilot.node
+
+  caffeinate -i 让节点运行期间电脑不进入空闲睡眠；不需要可以删掉前两个参数。
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.chatpilot.node</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-i</string>
+    <string>/usr/local/bin/chatpilot-node</string>
+    <string>run</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/YOUR_NAME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- 异常退出时自动重启；令牌被撤销时节点以退出码 2 退出，重新配对前会每 60 秒重试一次。 -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOUR_NAME/Library/Logs/chatpilot-node.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOUR_NAME/Library/Logs/chatpilot-node.log</string>
+</dict>
+</plist>

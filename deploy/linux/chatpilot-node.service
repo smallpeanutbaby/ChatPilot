@@ -1,0 +1,23 @@
+# ChatPilot 节点：Linux 用户级 systemd 服务（以你自己的身份运行，能访问你的 herdr）。
+#
+# 安装：
+#   先运行一次 chatpilot-node pair ... 完成配对
+#   mkdir -p ~/.config/systemd/user && cp chatpilot-node.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now chatpilot-node
+#   loginctl enable-linger $USER          # 没登录桌面时也保持运行
+#   journalctl --user -u chatpilot-node -f
+
+[Unit]
+Description=ChatPilot node
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/chatpilot-node run
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# 异常退出时重启；令牌被撤销时以退出码 2 退出，不再重启。
+Restart=on-failure
+RestartPreventExitStatus=2
+RestartSec=10
+
+[Install]
+WantedBy=default.target

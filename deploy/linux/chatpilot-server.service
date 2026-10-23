@@ -1,0 +1,49 @@
+# ChatPilot 服务器：Linux systemd 服务（带安全加固）。
+#
+# 安装：
+#   sudo useradd --system --home /var/lib/chatpilot --shell /usr/sbin/nologin chatpilot
+#   sudo mkdir -p /opt/chatpilot /var/lib/chatpilot && sudo chown chatpilot: /var/lib/chatpilot && sudo chmod 700 /var/lib/chatpilot
+#   sudo cp chatpilot-server appsettings.json /opt/chatpilot/
+#   修改下面的 ChatPilot__PublicUrl，然后：
+#   sudo cp chatpilot-server.service /etc/systemd/system/
+#   # 第一次先交互式绑定微信（需要输入验证码时只能这样做）：
+#   sudo -u chatpilot env ChatPilot__DataDir=/var/lib/chatpilot /opt/chatpilot/chatpilot-server login
+#   sudo systemctl daemon-reload && sudo systemctl enable --now chatpilot-server
+#   journalctl -u chatpilot-server -f        # 看日志、证书指纹
+#
+# 防火墙只需要放行 8443/tcp。
+
+[Unit]
+Description=ChatPilot server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=chatpilot
+Group=chatpilot
+WorkingDirectory=/opt/chatpilot
+ExecStart=/opt/chatpilot/chatpilot-server run
+Environment=ChatPilot__DataDir=/var/lib/chatpilot
+Environment=ChatPilot__PublicUrl=https://your-server.example.com:8443
+Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1
+Restart=always
+RestartSec=5
+
+# 安全加固：只读系统、看不到 /home、只能写数据目录、不能提权。
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/chatpilot
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
