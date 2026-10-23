@@ -271,6 +271,51 @@ public sealed class CommandExecutorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Dropped_user_prompt_is_resent_once()
+    {
+        // 真机测试发现：pi 刚启动时 herdr 已经报告空闲，但界面还在加载，紧接着发的指令被吞了，屏幕上找不到它。
+        var agent = _herdr.AddAgent("pi", "demo", kind: "pi");
+        _herdr.Screen = SampleScreens.PiReply;
+        _herdr.SwallowPrompts = 1;
+        Assert.True((await _executor.ExecuteAsync(new PromptCommand(agent.PaneId, "列出当前目录的文件"), CancellationToken.None)).Ok);
+
+        var ev = await _events.WaitAsync();
+        Assert.Equal(AgentEventKind.Completed, ev.Kind);
+        Assert.Equal(2, _herdr.CallsStartingWith("agent", "prompt").Count);
+    }
+
+    [Theory]
+    [InlineData("只回复两个字：收到。不要使用任何工具。", "回显在屏幕上，说明它收到了")]
+    [InlineData("/compact", "斜杠命令执行完不一定有状态变化")]
+    [InlineData("继续", "太短，判断不了在不在屏幕上")]
+    public async Task Prompt_without_activity_is_not_resent_unless_surely_dropped(string prompt, string reason)
+    {
+        // 默认屏幕（SampleScreens.ClaudeReply）里回显着"只回复两个字：收到。不要使用任何工具。"
+        var agent = _herdr.AddAgent("tideq", "TideQ");
+        _herdr.SwallowPrompts = 1;
+        Assert.True((await _executor.ExecuteAsync(new PromptCommand(agent.PaneId, prompt), CancellationToken.None)).Ok);
+
+        var ev = await _events.WaitAsync();
+        Assert.Equal(AgentEventKind.Failed, ev.Kind);
+        Assert.Contains("没看到它开始工作", ev.Text, StringComparison.Ordinal);
+        Assert.True(_herdr.CallsStartingWith("agent", "prompt").Count == 1, reason);
+    }
+
+    [Fact]
+    public async Task Resent_prompt_that_is_dropped_again_is_reported_once()
+    {
+        var agent = _herdr.AddAgent("pi", "demo", kind: "pi");
+        _herdr.Screen = SampleScreens.PiReply;
+        _herdr.SwallowPrompts = 2;
+        Assert.True((await _executor.ExecuteAsync(new PromptCommand(agent.PaneId, "列出当前目录的文件"), CancellationToken.None)).Ok);
+
+        var ev = await _events.WaitAsync();
+        Assert.Equal(AgentEventKind.Failed, ev.Kind);
+        Assert.Contains("已自动重发一次", ev.Text, StringComparison.Ordinal);
+        Assert.Equal(2, _herdr.CallsStartingWith("agent", "prompt").Count);
+    }
+
+    [Fact]
     public async Task Start_agent_refuses_paths_outside_whitelist_and_unknown_kinds()
     {
         // S-07 / S-10

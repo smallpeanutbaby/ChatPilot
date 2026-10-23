@@ -105,6 +105,24 @@ public class ReplyExtractorTests
         Assert.DoesNotContain("pi-lens", ReplyExtractor.ScreenExcerpt(SampleScreens.PiReply), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("帮我跑一下测试", true)]
+    [InlineData("帮 我 跑 一下\n测试", true)]
+    [InlineData("列出当前目录的文件", false)]
+    [InlineData("继续", true)]
+    [InlineData("", true)]
+    public void Prompt_is_considered_visible_unless_surely_absent(string prompt, bool expected) =>
+        Assert.Equal(expected, ReplyExtractor.MayShowPrompt(SampleScreens.PiReply, prompt));
+
+    [Fact]
+    public void Wrapped_or_pasted_prompts_count_as_visible()
+    {
+        // 折行、缩进、边框都不影响；长文字被折叠成 [Pasted text …] 时判断不了，按"看得到"处理。
+        Assert.True(ReplyExtractor.MayShowPrompt("│ > 请把这个函数改成\n│   异步的写法 │", "请把这个函数改成异步的写法，然后跑测试"));
+        Assert.True(ReplyExtractor.MayShowPrompt("❯ [Pasted text #1 +20 lines]", "一段很长的需求说明……"));
+        Assert.False(ReplyExtractor.MayShowPrompt(SampleScreens.IdleScreen, "一段很长的需求说明……"));
+    }
+
     [Fact]
     public void Multi_line_prompts_are_anchored_on_their_last_line()
     {

@@ -21,6 +21,12 @@ public static partial class ReplyExtractor
     /// <summary>用提交的文字定位这一轮的起点时，最多比对它最后一行的多少个字符。</summary>
     private const int PromptAnchorChars = 40;
 
+    /// <summary>在屏幕上找提交的文字时，比对它第一行开头的多少个字符（不含空白）。</summary>
+    private const int PromptSnippetChars = 12;
+
+    /// <summary>提交的文字第一行少于这么多字符（不含空白）时，判断不了它在不在屏幕上。</summary>
+    private const int MinPromptSnippetChars = 4;
+
     /// <summary>Claude Code 的状态行、加载动画都从第 0 列的这些符号开始；回复正文不会从第 0 列开始写这些符号。</summary>
     private static readonly char[] SpinnerGlyphs = ['✻', '✳', '✶', '✽', '✢', '✺', '·', '*', '∗'];
 
@@ -87,6 +93,32 @@ public static partial class ReplyExtractor
 
         return TextChunker.TrimLines(compact.TakeLast(maxLines));
     }
+
+    /// <summary>
+    /// 屏幕上可能有提交的这段文字吗（回显在对话里，或者还停在输入框里）。
+    /// 用来判断一条没引起任何反应的指令是不是被吞了：只有确定找不到才返回 false，拿不准一律返回 true。
+    /// 比较时去掉所有空白和边框竖线，这样折行、缩进和边框都不影响。
+    /// </summary>
+    internal static bool MayShowPrompt(string screen, string prompt)
+    {
+        ArgumentNullException.ThrowIfNull(screen);
+        ArgumentNullException.ThrowIfNull(prompt);
+        var firstLine = prompt.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n')
+            .Select(Compact)
+            .FirstOrDefault(l => l.Length > 0);
+
+        // 太短的文字（比如"继续"）在屏幕上别处也可能出现，判断不了；长文字可能被折叠成 [Pasted text …] 显示。
+        if (firstLine is null || firstLine.Length < MinPromptSnippetChars || PastedPlaceholderRegex().IsMatch(screen))
+        {
+            return true;
+        }
+
+        var snippet = firstLine.Length <= PromptSnippetChars ? firstLine : firstLine[..PromptSnippetChars];
+        return Compact(screen).Contains(snippet, StringComparison.Ordinal);
+    }
+
+    /// <summary>去掉空白和边框竖线。</summary>
+    private static string Compact(string text) => string.Concat(text.Where(c => !char.IsWhiteSpace(c) && c is not ('│' or '┃')));
 
     /// <summary>按行拆分（兼容 CRLF），并去掉每行末尾的空白。</summary>
     internal static List<string> SplitLines(string text) =>
@@ -333,6 +365,10 @@ public static partial class ReplyExtractor
     /// <summary>选项列表里的一行（<c>1. Yes</c>）。</summary>
     [GeneratedRegex(@"^\d+[.)]\s", RegexOptions.CultureInvariant)]
     private static partial Regex NumberedOptionRegex();
+
+    /// <summary>长文字粘贴后的折叠显示：Claude Code 的 <c>[Pasted text #1 +20 lines]</c>、Codex 的 <c>[Pasted Content 1234 chars]</c>。</summary>
+    [GeneratedRegex(@"\[Pasted", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex PastedPlaceholderRegex();
 
     /// <summary>圆角边框里的输入行：<c>│ &gt; …</c>（Gemini / Qwen 等）。</summary>
     [GeneratedRegex(@"^\s*│\s*[>›❯]\s?", RegexOptions.CultureInvariant)]

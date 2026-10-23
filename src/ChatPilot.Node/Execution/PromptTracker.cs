@@ -31,6 +31,9 @@ public sealed class PromptTracker : IAsyncDisposable
     /// <summary>初始说明最多发送几次。</summary>
     internal const int InitialPromptAttempts = 3;
 
+    /// <summary>判断指令有没有被吞时读多少行终端输出。</summary>
+    private const int DropCheckLines = 200;
+
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(300);
     private static readonly string[] SettledStates = [AgentStatus.Idle, AgentStatus.Done, AgentStatus.Blocked];
     private static readonly string[] ReadyStates = [AgentStatus.Idle, AgentStatus.Done];
@@ -54,7 +57,7 @@ public sealed class PromptTracker : IAsyncDisposable
     /// <param name="config">节点配置（等待时长、回复长度上限）。</param>
     /// <param name="logger">日志。</param>
     /// <param name="initialPromptGrace">
-    /// agent 刚就绪后等多久再发初始说明（默认 3 秒）。刚确认完"信任此目录"时 herdr 已经报告空闲，
+    /// agent 刚就绪后等多久再发初始说明（默认 3 秒），被吞的指令重发前也等这么久。刚确认完"信任此目录"时 herdr 已经报告空闲，
     /// 但 Claude 的界面还在初始化，这时输入的文字会被吞掉。
     /// </param>
     /// <param name="activityTimeout">提交后最多等多久看 agent 有没有开始干活（默认 10 秒）。</param>
@@ -242,17 +245,75 @@ public sealed class PromptTracker : IAsyncDisposable
         return WatchResult.Started;
     }
 
-    /// <summary>提交后：先确认 agent 开始干活，再等它停下并上报。</summary>
+    /// <summary>
+    /// 提交后：先确认 agent 开始干活，再等它停下并上报。
+    /// 迟迟没有动静、并且能确定文字被吞了时（agent 刚启动、界面还没准备好会丢输入），自动重发一次。
+    /// </summary>
     private async Task FollowPromptAsync(HerdrAgent before, string prompt, CancellationToken cancellationToken)
     {
         var started = await WaitForActivityAsync(before, cancellationToken).ConfigureAwait(false);
+        var resent = false;
         if (started is null)
         {
-            Publish(AgentEventKind.Failed, before, $"提交后 {_activityTimeout.TotalSeconds:0} 秒内没看到它开始工作，可以用 /read 看看");
+            (started, resent) = await ResendIfDroppedAsync(before, prompt, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (started is null)
+        {
+            Publish(AgentEventKind.Failed, before, resent
+                ? "提交后没看到它开始工作，屏幕上也找不到这条指令，已自动重发一次，还是没有反应，可以用 /read 看看"
+                : $"提交后 {_activityTimeout.TotalSeconds:0} 秒内没看到它开始工作，可以用 /read 看看");
             return;
         }
 
         await FollowStartedAsync(started, prompt, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 判断提交的文字是不是被吞了，是的话重发一次并再等它开始工作。
+    /// 用户的指令不能被执行两次，所以只有这几条都满足才重发：不是斜杠命令（命令执行完不一定有状态变化）、
+    /// agent 仍然空闲且状态从没变过、屏幕上（对话里和输入框里）都找不到这段文字。拿不准一律不重发。
+    /// </summary>
+    /// <returns>开始工作后的 agent（没开始为 null），以及有没有重发。</returns>
+    private async Task<(HerdrAgent? Started, bool Resent)> ResendIfDroppedAsync(HerdrAgent before, string prompt, CancellationToken cancellationToken)
+    {
+        string screen;
+        try
+        {
+            var current = await _herdr.TryGetAgentAsync(before.PaneId, cancellationToken).ConfigureAwait(false);
+            if (current is null)
+            {
+                return (null, false);
+            }
+
+            if (HasStarted(before, current))
+            {
+                // 超时之后刚好开始了。
+                return (current, false);
+            }
+
+            if (!current.IsReady || prompt.TrimStart().StartsWith('/'))
+            {
+                return (null, false);
+            }
+
+            screen = await _herdr.ReadAsync(before.PaneId, "recent-unwrapped", DropCheckLines, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HerdrException ex)
+        {
+            _logger.LogDebug("检查 {Agent} 有没有收到指令时出错：{Message}", before.Name ?? before.PaneId, ex.Message);
+            return (null, false);
+        }
+
+        if (ReplyExtractor.MayShowPrompt(screen, prompt))
+        {
+            return (null, false);
+        }
+
+        _logger.LogWarning("提交给 {Agent} 的指令没有被接收（屏幕上找不到），重发一次", before.Name ?? before.PaneId);
+        await Task.Delay(_initialPromptGrace, cancellationToken).ConfigureAwait(false);
+        await _herdr.PromptAsync(before.PaneId, prompt, cancellationToken).ConfigureAwait(false);
+        return (await WaitForActivityAsync(before, cancellationToken).ConfigureAwait(false), true);
     }
 
     /// <summary>agent 已经开始干活（或已经做完）：等它停下并上报。</summary>
@@ -264,10 +325,11 @@ public sealed class PromptTracker : IAsyncDisposable
         await ReportSettledAsync(settled ?? started, prompt, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// 轮询直到看到 agent 有动静：状态序号变了（哪怕已经做完），或者状态是工作中 / 等确认。
-    /// 超时或 agent 不见了返回 null。
-    /// </summary>
+    /// <summary>和提交前相比有没有动静：状态序号变了（哪怕已经做完），或者状态是工作中 / 等确认。</summary>
+    private static bool HasStarted(HerdrAgent before, HerdrAgent current) =>
+        current.StateChangeSeq > before.StateChangeSeq || current.Status is AgentStatus.Working or AgentStatus.Blocked;
+
+    /// <summary>轮询直到看到 agent 有动静（见 <see cref="HasStarted"/>）。超时或 agent 不见了返回 null。</summary>
     private async Task<HerdrAgent?> WaitForActivityAsync(HerdrAgent before, CancellationToken cancellationToken)
     {
         var deadline = DateTimeOffset.UtcNow + _activityTimeout;
@@ -279,7 +341,7 @@ public sealed class PromptTracker : IAsyncDisposable
                 return null;
             }
 
-            if (current.StateChangeSeq > before.StateChangeSeq || current.Status is AgentStatus.Working or AgentStatus.Blocked)
+            if (HasStarted(before, current))
             {
                 return current;
             }
@@ -293,7 +355,7 @@ public sealed class PromptTracker : IAsyncDisposable
     /// <summary>
     /// 如果这个 agent 有挂起的初始指令，发送它并跟踪到做完（只会取出一次）。
     /// 初始说明是程序生成的、重发无害，所以没看到 agent 开始工作时会重发，最多 <see cref="InitialPromptAttempts"/> 次；
-    /// 用户自己发的指令不自动重发，避免同一个任务被执行两次。
+    /// 用户自己发的指令只在确定被吞了时重发一次（见 <see cref="ResendIfDroppedAsync"/>），避免同一个任务被执行两次。
     /// </summary>
     private async Task SendPendingInitialPromptAsync(HerdrAgent agent, CancellationToken cancellationToken)
     {
