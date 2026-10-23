@@ -28,12 +28,29 @@
 🤖 👌 [win] api：已选择：1. Yes
 ```
 
+## 目录
+
+- [特点](#特点)
+- [工作原理](#工作原理)
+- [准备工作](#准备工作)
+- [快速开始](#快速开始)：一台电脑先跑起来
+- [正式部署](#正式部署)：云服务器 + 多台电脑，升级、迁移、卸载
+- [使用指南](#使用指南)：每条指令怎么用
+- [支持的 agent](#支持的-agent)
+- [配置](#配置)
+- [安全](#安全)
+- [排错](#排错)
+- [常见问题](#常见问题)
+- [已知限制](#已知限制)
+- [开发](#开发) · [贡献](#贡献) · [致谢](#致谢) · [许可证](#许可证)
+
 ## 特点
 
 - **一个微信管所有电脑**：每台电脑装一个节点，在同一个对话里用 `@mac/web`、`@win/api` 指定是哪台的哪个 agent。
-- **没有额外的 AI**：理解指令、写代码的都是你电脑上原来的 agent；ChatPilot 只负责传话，不调用任何大模型接口。
+- **没有额外的 AI**：理解指令、写代码的都是你电脑上原来的 agent；ChatPilot 只负责传话，不调用任何大模型接口，也不需要你提供 API Key。
 - **支持 20 多种 agent**：Claude Code、Codex、pi、Kimi、Qwen、opencode、Cursor、Copilot……herdr 能管的都能用（[支持细节](docs/AGENTS.md)）。
-- **结果自动推回来**：任务做完推送 agent 的回复，卡在确认框时推送屏幕内容，`/yes` 只会选"这一次同意"，不会替你选"以后都允许"。
+- **结果自动推回来**：任务做完推送 agent 的回复，卡在确认框时推送屏幕内容；能读到会话记录时推的是完整原文，不是终端截屏。
+- **确认框不乱点**：`/yes` 只会选"这一次同意"，绝不替你选"以后都允许""本项目都允许"这类会扩大权限的选项。
 - **电脑不用开端口**：节点只往外连服务器，不需要公网 IP；连接走 TLS，节点只认配对时记下的证书指纹。
 - **单文件程序**：服务器和节点都打包成自带运行时的单个可执行文件，目标电脑不用装 .NET。
 
@@ -52,26 +69,38 @@
 
 | 组件 | 做什么 | 装在哪 |
 |---|---|---|
-| **服务器** `chatpilot-server` | 绑定微信、收你的消息、转发给对应电脑、把结果推回微信 | 只要一份：云服务器，或者只有一台电脑时直接放在这台电脑上 |
-| **节点** `chatpilot-node` | 执行服务器发来的指令：列出 agent、派活、读终端、按确认键 | 每台要被控制的电脑一份 |
+| **服务器** `chatpilot-server` | 绑定微信、收你的消息、解析指令、转发给对应电脑、把结果推回微信 | 只要一份：云服务器，或者只有一台电脑时直接放在这台电脑上 |
+| **节点** `chatpilot-node` | 执行服务器发来的指令：列出 agent、派活、读终端、按确认键、新开 agent | 每台要被控制的电脑一份 |
 | **[herdr](https://herdr.dev)** | 终端里的 agent 管理器：开终端、识别 agent 在工作还是在等确认、读写终端 | 每台要被控制的电脑 |
+
+**一条消息的旅程**（以 `@tideq 跑一下测试` 为例）：
+
+1. 服务器从腾讯 iLink 长轮询收到你的消息，确认是绑定的那个微信号发的；
+2. 服务器解析出目标 `tideq` 在哪台电脑上，通过这台电脑的节点连接发过去；
+3. 节点校验参数，调用 `herdr agent prompt` 把文字交给 agent，立刻回"已发送"；
+4. 节点在后台盯着 agent 的状态：做完了、卡在确认框了、出错了，都会作为事件发回服务器；
+5. 做完时节点读 agent 的会话记录（读不到就读终端），把最后一条回复发回服务器，服务器推到你微信。
 
 扫码绑定微信是服务器做的，只做一次；以后加电脑只装节点、配对，不用再扫码。
 
 ## 准备工作
 
-- **每台要被控制的电脑**：装好 [herdr](https://herdr.dev) 并打开过一次，以及你要用的 agent（Claude Code、Codex……）。为了让推送的回复完整，给常用的 agent 装上 herdr 集成，例如 `herdr integration install claude`、`herdr integration install codex`。
+- **每台要被控制的电脑**：
+  - 装好 [herdr](https://herdr.dev) 并打开过一次；
+  - 装好你要用的 agent（Claude Code、Codex……），并在终端里手动运行过一次，确认已经登录；
+  - 给常用的 agent 装上 herdr 集成，推送的回复才完整：`herdr integration install claude`、`herdr integration install codex`……用 `herdr integration status` 查看。
 - **一个微信号**：用来绑定机器人、接收通知。
-- **放服务器的地方**：一台云服务器（1 核 1G 就够，香港或海外不用备案）；只有一台电脑时也可以直接放在这台电脑上。不需要域名，也不需要买证书。
-- **打包用**：[.NET 10 SDK](https://dotnet.microsoft.com/download)，只在打包的电脑上需要。
+- **放服务器的地方**：一台云服务器（1 核 1G 就够，香港或海外不用备案）；只有一台电脑时也可以直接放在这台电脑上。**不需要域名，也不需要买证书。**
+- **网络**：服务器要能访问 `https://ilinkai.weixin.qq.com`；每台电脑要能访问服务器的 8443 端口。
+- **打包用**：[.NET 10 SDK](https://dotnet.microsoft.com/download)，只在打包的那台电脑上需要。Windows 上运行打包脚本需要 Git Bash。
 
-> **为什么一定要 herdr？** 节点不直接操作终端，而是通过 herdr：开终端、判断 agent 是在工作还是在等确认、读写终端、拿到会话记录，这些对 20 多种 agent 都要单独适配，herdr 已经做好了。不装 herdr 的话，节点什么也做不了。
+> **为什么一定要 herdr？** 节点不直接操作终端，而是通过 herdr：开终端、判断 agent 是在工作还是在等确认、读写终端、拿到会话记录。这些对 20 多种 agent 都要单独适配，herdr 已经做好了。不装 herdr 的话，节点什么也做不了。
 
-## 快速开始：一台电脑先跑起来
+## 快速开始
 
-服务器和节点放在同一台电脑上，不用云服务器。下面以 Windows 为例，macOS / Linux 同理。
+先在一台电脑上把服务器和节点都跑起来，不用云服务器。下面以 Windows 为例，macOS / Linux 同理（自启方式见[正式部署](#正式部署)）。
 
-**1. 打包**（Windows 上在 Git Bash 里运行）
+**1. 打包**（在 Git Bash 里运行）
 
 ```bash
 RIDS="win-x64" scripts/publish.sh        # 输出到 artifacts/win-x64/{server,node}/
@@ -89,7 +118,7 @@ RIDS="win-x64" scripts/publish.sh        # 输出到 artifacts/win-x64/{server,n
 }
 ```
 
-只听本机时可以不开 TLS；服务器要对外时必须开（默认就是开的）。
+只听本机时可以不开 TLS；服务器要对外时必须开（默认就是开的，程序也会拒绝"对外监听却不开 TLS"的配置）。
 
 **3. 绑定微信**
 
@@ -97,7 +126,7 @@ RIDS="win-x64" scripts/publish.sh        # 输出到 artifacts/win-x64/{server,n
 C:\Tools\chatpilot\server\chatpilot-server.exe login
 ```
 
-终端里会显示二维码，用手机微信扫码并确认，看到"✅ 微信绑定成功"就好了。之后微信里会出现和这个机器人的对话，以后都在这个对话里发指令。
+终端里会显示二维码，用手机微信扫码并在手机上确认，看到"✅ 微信绑定成功"就好了。之后微信里会出现和这个机器人的对话，以后都在这个对话里发指令。如果手机上要求输入数字验证码，直接在这个终端里输入。
 
 **4. 让服务器常驻**（登录 Windows 后自动启动）
 
@@ -113,120 +142,326 @@ C:\Tools\chatpilot\node\chatpilot-node.exe doctor
 powershell -ExecutionPolicy Bypass -File deploy\windows\install-node-task.ps1 -NodePath C:\Tools\chatpilot\node\chatpilot-node.exe
 ```
 
-**6. 试一下**：微信里发 `/devices`，看到 `🟢 win` 就通了；发 `/ls` 列出 agent，`@序号 内容` 派活。
+**6. 试一下**：微信里发 `/devices`，看到 `🟢 win` 就通了；发 `/ls` 列出 agent，`@序号 内容` 派活。完整用法见[使用指南](#使用指南)。
 
-> Windows 上用 npm 装的 codex、kimi、pi 是通过 `.ps1` 脚本启动的，如果 `/new` 启动它们时超时，执行一次 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`。
+> Windows 上用 npm 装的 codex、kimi、pi 是通过 `.ps1` 脚本启动的。如果 `/new` 启动它们时超时，执行一次 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`。
 
-## 正式部署：云服务器 + 多台电脑
+## 正式部署
 
-### 服务器（Linux）
+要控制多台电脑、或者人在外面也要用时，把服务器放到云上，每台电脑只装节点。
+
+### 服务器（Linux 云服务器）
 
 ```bash
 # 在打包的电脑上
 RIDS="linux-x64" scripts/publish.sh
-scp artifacts/linux-x64/server/{chatpilot-server,appsettings.json} 你的服务器:/tmp/
+scp artifacts/linux-x64/server/{chatpilot-server,appsettings.json} deploy/linux/chatpilot-server.service 你的服务器:/tmp/
 
-# 在服务器上（详细步骤见 deploy/linux/chatpilot-server.service 开头的注释）
+# 在服务器上
 sudo useradd --system --home /var/lib/chatpilot --shell /usr/sbin/nologin chatpilot
 sudo mkdir -p /opt/chatpilot /var/lib/chatpilot && sudo chown chatpilot: /var/lib/chatpilot && sudo chmod 700 /var/lib/chatpilot
 sudo mv /tmp/chatpilot-server /tmp/appsettings.json /opt/chatpilot/ && sudo chmod +x /opt/chatpilot/chatpilot-server
 sudo -u chatpilot env ChatPilot__DataDir=/var/lib/chatpilot /opt/chatpilot/chatpilot-server login   # 扫码绑定微信
-# 改好 service 文件里的 ChatPilot__PublicUrl（https://服务器IP:8443）再注册
-sudo cp chatpilot-server.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now chatpilot-server
-journalctl -u chatpilot-server -f    # 记下日志里的证书指纹 sha256:…
+
+# 把 service 文件里的 ChatPilot__PublicUrl 改成 https://服务器IP:8443，再注册成服务
+sudo mv /tmp/chatpilot-server.service /etc/systemd/system/ && sudo systemctl daemon-reload
+sudo systemctl enable --now chatpilot-server
+journalctl -u chatpilot-server -f    # 看日志；记下打印出来的证书指纹 sha256:…
 ```
 
-- 安全组 / 防火墙只放行 **8443/tcp**（和你的 SSH 端口）。
-- **证书不用买**：第一次启动时自动生成自签证书（10 年有效）。节点配对时记下它的指纹，以后只认这张证书，比普通的 CA 校验更严。
-- **从"一台电脑"迁移过来**：把原来的数据目录（Windows 上是 `%USERPROFILE%\.chatpilot\server\`）里的 `state.json` 拷到 `/var/lib/chatpilot/`（属主 chatpilot、权限 600），微信绑定和已配对的设备都会跟过来，不用重新扫码。证书会重新生成，所以节点要带上新指纹重新配对一次。
+- 安全组 / 防火墙只放行 **8443/tcp**（和你的 SSH 端口）；SSH 建议只允许密钥登录。
+- **证书不用买**：第一次启动时自动生成自签证书（10 年有效），保存在数据目录的 `server.pfx`。节点配对时记下它的指纹，以后只认这张证书。随时可以用 `chatpilot-server fingerprint` 查看指纹。
+- service 文件已经做了加固：以 `chatpilot` 用户运行、系统目录只读、只能写数据目录、不能提权。
+- 香港或海外服务器不用备案；国内服务器用域名加 443 端口需要 ICP 备案。
 
-### 每台电脑：装节点
+### 节点：每台电脑
 
-1. 微信里发 `/pair 设备名`，复制返回的命令在那台电脑上运行，命令里已经带好了 `--fingerprint`：
+无论哪个系统，第一步都一样：在微信里发 `/pair 设备名`，复制返回的命令在那台电脑上运行（命令里已经带好了服务器地址、配对码和证书指纹），再加上 `--root` 指定允许 `/new` 打开的目录：
 
-   ```bash
-   chatpilot-node pair --server https://服务器IP:8443 --code ABCD-EFGH \
-     --fingerprint sha256:… --name mac --root ~/code
-   ```
+```bash
+chatpilot-node pair --server https://服务器IP:8443 --code ABCD-EFGH \
+  --fingerprint sha256:… --name mac --root ~/code --root ~/work
+chatpilot-node doctor     # 自检：herdr、允许的目录、agent 类型、服务器连通性
+```
 
-   `--root` 是允许 `/new` 打开的目录，可以写多个；不写默认是用户主目录。
-2. `chatpilot-node doctor` 自检：herdr、允许的目录、agent 类型、服务器连通性。
-3. 设成开机自启：
-   - **Windows**：[`deploy/windows/install-node-task.ps1`](deploy/windows/install-node-task.ps1)（登录后启动；不要注册成 Windows 服务，服务账户访问不到你的 herdr）
-   - **macOS**：[`deploy/macos/com.chatpilot.node.plist`](deploy/macos/com.chatpilot.node.plist)（自带 `caffeinate`，防止电脑睡眠）
-   - **Linux**：[`deploy/linux/chatpilot-node.service`](deploy/linux/chatpilot-node.service)
+`--root` 可以写多个；不写默认是用户主目录。配对码 10 分钟内有效、只能用一次。配置写在 `~/.chatpilot/node.json`（权限 600）。
 
-## 手机上怎么用
+然后设成开机自启：
+
+**Windows**：登录后通过计划任务启动。不要注册成 Windows 服务：服务账户访问不到你的 herdr。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy\windows\install-node-task.ps1 -NodePath C:\Tools\chatpilot\node\chatpilot-node.exe
+# 日志：%LOCALAPPDATA%\ChatPilot\node.log
+# 卸载：Unregister-ScheduledTask -TaskName ChatPilotNode -Confirm:$false
+```
+
+**macOS**：launchd，自带 `caffeinate`，节点运行期间电脑不会进入空闲睡眠。
+
+```bash
+sudo cp chatpilot-node /usr/local/bin/
+# 把 deploy/macos/com.chatpilot.node.plist 里的 YOUR_NAME 换成你的用户名
+cp deploy/macos/com.chatpilot.node.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.chatpilot.node.plist
+tail -f ~/Library/Logs/chatpilot-node.log                      # 日志
+launchctl bootout gui/$(id -u)/com.chatpilot.node              # 停止
+```
+
+**Linux**：用户级 systemd 服务，以你自己的身份运行。
+
+```bash
+cp chatpilot-node ~/.local/bin/
+mkdir -p ~/.config/systemd/user && cp deploy/linux/chatpilot-node.service ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now chatpilot-node
+loginctl enable-linger $USER                  # 没登录桌面时也保持运行
+journalctl --user -u chatpilot-node -f        # 日志
+```
+
+### 升级
+
+重新打包后，停掉服务、替换可执行文件、再启动即可。配置、微信绑定、配对关系都在数据目录里，不受影响。
+
+- 服务器：`sudo systemctl stop chatpilot-server` → 替换 `/opt/chatpilot/chatpilot-server` → `sudo systemctl start chatpilot-server`。
+- 节点：Windows 用 `Stop-ScheduledTask` / `Start-ScheduledTask -TaskName ChatPilotNode`，macOS 用 `launchctl bootout` / `bootstrap`，Linux 用 `systemctl --user restart chatpilot-node`。
+
+服务器和节点之间的协议有版本号，升级时尽量两边一起升。
+
+### 迁移服务器
+
+比如从"一台电脑"换到云服务器：把旧服务器数据目录里的 `state.json` 拷到新服务器的数据目录（Linux 上是 `/var/lib/chatpilot/`，属主 `chatpilot`、权限 600）。微信绑定和已配对的设备都会跟过来，不用重新扫码。
+
+`server.pfx`（证书）也一起拷的话，指纹不变，节点只需要改服务器地址；不拷的话会生成新证书，每台电脑的节点要带上新指纹重新配对一次。
+
+### 卸载
+
+- 撤销某台电脑：微信里发 `/unpair 设备名`，那台电脑的节点会立即断开并退出，令牌作废。
+- 删除节点：停掉自启服务，删除可执行文件和 `~/.chatpilot/node.json`。
+- 删除服务器：停掉服务，删除可执行文件和数据目录。数据目录里有微信的 bot token，请彻底删除。
+
+## 使用指南
+
+### 指令一览
 
 | 指令 | 作用 |
 |---|---|
+| `/help` | 显示指令说明 |
 | `/devices` | 设备列表和在线状态 |
 | `/use 设备` | 切换默认设备 |
 | `/ls [设备]` | 列出 agent（带序号） |
 | `@目标 内容` | 把任务交给 agent，做完会推送它的回复 |
 | `/read 目标 [行数]` | 看最近的终端输出 |
 | `/new [设备] 目录 [类型] [名字]` | 在允许的目录里新开工作区并启动 agent |
-| `/yes 目标` · `/no 目标` | 处理确认框：只选"这一次同意"；会扩大权限的选项列出来让你用 `/keys` 自己选 |
-| `/keys 目标 按键…` | 发送白名单内的按键，例如 `/keys api down enter` |
+| `/yes 目标` · `/no 目标` | 同意 / 拒绝确认框 |
+| `/keys 目标 按键…` | 发送白名单内的按键 |
 | `/name 目标 新名字` | 给 agent 改名 |
-| `/butler [设备]` | 创建管家 agent：之后直接发文字（不带指令）就交给它，由它通过 herdr 分派 |
+| `/butler [设备]` | 创建管家 agent |
+| 直接发文字 | 交给当前设备的管家 |
 | `/pair [设备名]` · `/unpair 设备` | 配对 / 撤销设备 |
 
-**目标**可以是 `/ls` 里的序号、agent 名字、工作区名或 pane ID，前面加 `设备/` 指定设备，例如 `@mac/web 跑一下测试`。
+### 指定目标
+
+**目标**用来指定是哪个 agent，有四种写法，都不区分大小写：
+
+| 写法 | 例子 | 说明 |
+|---|---|---|
+| 序号 | `@2` | 最近一次 `/ls` 里的序号；`/ls` 之后 agent 有增减时，先重新 `/ls` |
+| agent 名字 | `@tideq` | herdr 里给 agent 起的名字，用 `/name` 设置 |
+| 工作区名 | `@SitePivot-Api` | herdr 工作区的名字；一个工作区里有多个 agent 时会提示你选 |
+| pane ID | `@w2:pF` | herdr 的 pane 编号，`/ls` 里没名字的 agent 会显示它 |
+
+前面加 `设备/` 指定设备，例如 `@mac/tideq`、`/read win/2`。不加时在所有在线设备里找：先按名字和 pane ID 精确匹配，找不到再按工作区名；多处匹配时优先默认设备，仍然分不清就列出来让你选，不会乱发。
+
+### 派活和通知
+
+```text
+@tideq 把 README 里的安装步骤更新一下，改完跑一遍文档检查
+```
+
+发出后立刻收到"📨 已发给…"。之后会根据 agent 的状态推送：
+
+| 通知 | 什么时候 |
+|---|---|
+| ✅ `做完了` + 回复内容 | agent 做完、回到空闲 |
+| ⚠️ `在等你确认` + 屏幕内容 | agent 卡在确认框上，后面附 `/yes`、`/no` 的写法 |
+| ❌ `出错了` + 原因 | 提交后 10 秒没开始工作、等了太久（默认 6 小时）、读取失败等 |
+
+- 回复超过 4000 字会拆成多条，最多 4 条，再长的部分截断并提示。
+- 单条指令最长 16000 字。
+- agent 刚启动时，界面没准备好可能吞掉输入。节点会检查：确定指令被吞了（agent 没反应、屏幕上也找不到这段文字）才自动重发一次；拿不准就只提醒你，绝不让同一条指令执行两次。
+- 同一个 agent 有任务在跑时再派活，只会在最后做完时通知一次。
+
+### 处理确认框
+
+agent 想执行命令、改文件时，常常会弹出确认框，这时你会收到 ⚠️ 通知和屏幕内容。
+
+- `/yes 目标`：自动找到"这一次同意"的选项并选中（例如 `1. Yes`、`Allow once`、`Run (once)`）。如果选项只剩"不再询问""总是允许""本会话 / 本项目都允许"这类会扩大权限的，不会自动选，会把选项列出来。
+- `/no 目标`：按 Esc 拒绝。
+- `/keys 目标 按键…`：自己按键，最多 20 个。允许的按键：`enter esc tab shift+tab up down left right backspace ctrl+c y n 1`–`9`。例如 `/keys api down down enter`。
+
+`/yes`、`/no` 只在 agent 确实停在确认框上时才按键，避免迟到的 `/yes` 把回车按进输入框、迟到的 `/no` 用 Esc 打断正在干的活。各 agent 确认框的识别情况见 [`docs/AGENTS.md`](docs/AGENTS.md)。
+
+### 新开 agent
+
+```text
+/new D:\code\web                     在默认设备上用默认类型新开
+/new mac ~/code/api codex            指定设备和类型
+/new mac ~/code/api claude apibot    再指定名字
+/new “D:\代码\我的 项目” codex        路径有空格时用引号包住（中英文引号都行）
+```
+
+- 目录必须在节点配置的 `allowedRoots` 之内，`..` 之类的路径穿越会被拒绝。
+- 类型可以是 herdr 支持的 24 种（claude、codex、pi、kimi、qwen、opencode……），或节点配置 `launchers` 里自定义的（默认带 `reclaude`）。不写时用 `defaultAgentKind`。
+- 名字只能用小写字母开头，包含小写字母、数字、`_`、`-`，最长 32 位；不写时按目录名生成。
+- 新目录第一次打开时，agent 常会先问"是否信任这个目录"，你会收到 ⚠️ 通知，回 `/yes` 即可。
+
+### 查看终端
+
+`/read 目标 [行数]` 返回最近的终端输出，默认 60 行，可以是 1–500 行。输入框、空行和界面装饰会被去掉。适合在通知不够详细、或者想看 agent 正在干什么时用。
+
+### 管家
+
+管家是一个特别的 agent，名字固定叫 `butler`，专门替你分派任务：
+
+1. 发 `/butler [设备]`，ChatPilot 会在那台电脑上新开一个 agent，并告诉它：用 herdr 查看和指挥其他 agent；没有你明确要求时不关闭、删除任何东西；每次用简短的中文回复。
+2. 之后你直接发文字（不带 `/` 或 `@`），就会交给当前设备的管家，例如"看看哪个 agent 闲着，让它把测试跑一遍"。
+
+没有管家时直接发文字，会提示你创建一个或用 `@目标` 指定 agent。
+
+### 管理设备
+
+- `/devices`：所有设备和在线状态，🟢 在线、⚪ 离线。
+- `/use 设备`：切换默认设备。`/new`、`/butler`、直接发的文字没写设备时用默认设备；没选过默认设备时，如果只有一台在线就用它。`/ls` 不写设备时列出所有设备。
+- `/pair [设备名]`：生成配对码（8 位，10 分钟有效，只能用一次）。设备名可以用中英文、数字、`_`、`-`，最长 32 个字符。
+- `/unpair 设备`：撤销设备，它的节点立即断开、令牌作废；要重新接入得重新配对。
+
+## 支持的 agent
+
+| | agent |
+|---|---|
+| 真机验证过 | Claude Code / reclaude、Codex、pi |
+| 用真实会话文件核对过 | Kimi Code |
+| 按官方发布包或源码实现 | Qwen Code、opencode、Kilo Code、Droid、Cursor Agent、Copilot CLI、Grok Build |
+| 只读终端 | Gemini CLI，以及 herdr 支持的其他类型（agy、amp、cline、devin、hermes、kiro、letta、maki、mastracode、muse、omp、qodercli） |
+
+所有类型都能派活、看终端、发按键、收到做完的通知；差别在推送的回复是不是完整原文，以及 `/yes` 能不能自动识别确认框。每种 agent 的会话记录位置、环境变量和验证情况见 [`docs/AGENTS.md`](docs/AGENTS.md)。
 
 ## 配置
 
-**服务器**：`appsettings.json` 的 `ChatPilot` 节，也可以用环境变量覆盖（例如 `ChatPilot__Port=9443`）。
+### 服务器配置
+
+`appsettings.json` 的 `ChatPilot` 节，也可以用环境变量覆盖：层级用两个下划线连接，例如 `ChatPilot__Port=9443`、`ChatPilot__Tls__Enabled=false`。
 
 | 配置 | 默认 | 说明 |
 |---|---|---|
-| `ListenAddress` | `0.0.0.0` | 不开 TLS 时只能是回环地址 |
+| `ListenAddress` | `0.0.0.0` | 监听地址；不开 TLS 时只能是回环地址 |
 | `Port` | `8443` | |
 | `PublicUrl` | 无 | 节点连接用的地址，会写进 `/pair` 返回的命令 |
 | `DataDir` | `~/.chatpilot/server` | 状态文件、证书、登录二维码（权限 600） |
 | `Tls:Enabled` | `true` | 自签证书，首次启动自动生成 |
-| `WeChat:Enabled` | `true` | |
+| `CommandTimeoutSeconds` | `30` | 普通指令等节点回复多久（5–300） |
+| `StartAgentTimeoutSeconds` | `120` | `/new` 等节点回复多久（10–600） |
+| `WeChat:Enabled` | `true` | 关掉后只能用测试通道 |
+| `WeChat:MaxChunkChars` | `4000` | 单条微信消息最多多少字 |
+| `WeChat:MaxChunks` | `4` | 一次回复最多拆成几条 |
+| `DevChannel:Enabled` | `false` | 本机测试通道，见[开发](#开发)；只接受回环地址，必须设至少 16 位的 `DevChannel:Token` |
 
-**节点**：`~/.chatpilot/node.json`（权限 600，`pair` 时生成）。
+### 节点配置
 
-| 字段 | 说明 |
-|---|---|
-| `allowedRoots` | `/new` 允许的目录 |
-| `defaultAgentKind` | `/new` 默认类型；装了 reclaude 时默认 reclaude，否则 claude |
-| `launchers` | 自定义启动命令，默认带 `reclaude`（运行后等 herdr 识别出 claude） |
-| `herdrSession` | 用 herdr 的命名会话（默认用默认会话） |
-| `claudeProjectRoots` | 额外的 Claude 会话记录目录 |
-| `promptWaitHours` | 一个任务最多等多久才放弃通知（默认 6 小时） |
+`~/.chatpilot/node.json`（权限 600），`pair` 时生成，改完重启节点生效。也可以用 `--config 路径` 或环境变量 `CHATPILOT_NODE_CONFIG` 指定别的位置。
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `allowedRoots` | 配对时的 `--root` | `/new` 允许打开的目录（含子目录） |
+| `defaultAgentKind` | `reclaude` 或 `claude` | `/new` 不写类型时用哪种；配对时装了 reclaude 就默认它 |
+| `launchers` | 带 `reclaude` | 自定义启动命令，见下面的例子 |
+| `herdrPath` | `herdr` | herdr 可执行文件；开机自启时 PATH 可能很短，建议写绝对路径 |
+| `herdrSession` | 无 | 用 herdr 的命名会话；不写用默认会话 |
+| `claudeProjectRoots` | 无 | 额外的 Claude 会话记录目录（`…/projects`） |
+| `commandTimeoutSeconds` | `25` | 单次 herdr 调用的超时（5–25） |
+| `agentStartTimeoutSeconds` | `60` | 等 agent 启动就绪多久（10–90） |
+| `promptWaitHours` | `6` | 一个任务最多等多久才放弃通知（1–48） |
+| `maxReplyChars` | `12000` | 推送回复的最大字数（500–16000），超出时保留结尾 |
+
+`launchers` 用来接入 herdr 不能直接启动的命令，例如包装过的启动脚本。节点会在新终端里运行 `command`，等 herdr 识别出 `detectAs` 类型的 agent：
+
+```json
+"launchers": {
+  "reclaude": { "command": "reclaude", "detectAs": "claude" },
+  "work-claude": { "command": "claude --model opus", "detectAs": "claude" }
+}
+```
+
+`command` 只来自本机配置，手机发不了任意命令；`detectAs` 必须是 herdr 认识的类型。
 
 ## 安全
 
 ChatPilot 能让手机远程给 agent 派活，而 agent 能读写代码、执行命令，所以请认真对待：
 
-- 只有绑定的那个微信号能发指令；节点用 256 位令牌加证书指纹连服务器，配对码一次性、10 分钟有效。
-- 节点是安全边界：只执行协议里定义的几种 herdr 操作，`/new` 只能打开白名单目录，`/keys` 只能发白名单按键，参数全部校验。
-- **服务器被攻破，就等于攻击者能给你所有电脑上的 agent 派活**。请用自己的服务器、及时更新系统、只开放 8443 和 SSH，SSH 只允许密钥登录。
-- 你的指令和 agent 的回复会经过服务器和腾讯。
+- 只有绑定的那个微信号能发指令，其他人发的消息直接忽略。
+- 节点用 256 位随机令牌加证书指纹连服务器；服务器只存令牌的哈希。配对码一次性、10 分钟有效；配对和令牌错误都按 IP 限流。
+- 节点是安全边界：只执行协议里定义的几种 herdr 操作，`/new` 只能打开白名单目录，`/keys` 只能发白名单按键，所有参数都校验，不经过 shell。
+- **服务器被攻破，就等于攻击者能给你所有电脑上的 agent 派活。** 请用自己的服务器、及时更新系统、只开放 8443 和 SSH，SSH 只允许密钥登录。
+- 你的指令和 agent 的回复会经过服务器和腾讯；不要让 agent 把密钥之类的内容发到聊天里。
+- 怀疑某台电脑的令牌泄露时，`/unpair` 之后重新配对。
 
-完整的威胁模型和控制措施见 [`docs/SECURITY.md`](docs/SECURITY.md)。
+完整的威胁模型和控制措施见 [`docs/SECURITY.md`](docs/SECURITY.md)。发现安全问题请私下联系维护者，不要公开提 Issue。
+
+## 排错
+
+**先看日志和自检**：
+
+| | 日志 | 自检 |
+|---|---|---|
+| 服务器（Linux） | `journalctl -u chatpilot-server -f` | `curl -k https://127.0.0.1:8443/healthz` |
+| 服务器（Windows 计划任务） | `%LOCALAPPDATA%\ChatPilot\server.log` | |
+| 节点（Windows） | `%LOCALAPPDATA%\ChatPilot\node.log` | `chatpilot-node doctor` |
+| 节点（macOS） | `~/Library/Logs/chatpilot-node.log` | `chatpilot-node doctor` |
+| 节点（Linux） | `journalctl --user -u chatpilot-node -f` | `chatpilot-node doctor` |
+
+日志里不会写令牌、配对码、消息内容和微信登录链接。
+
+**常见情况**：
+
+| 现象 | 原因和处理 |
+|---|---|
+| 微信里发消息没反应 | 看服务器日志：微信是否绑定成功；bot token 失效时会暂停 1 小时重试，一直失效就重新 `login` |
+| 绑定时要输入验证码，服务没反应 | 后台运行时没法输入，停掉服务，运行 `chatpilot-server login` 在终端里完成 |
+| `/devices` 显示设备离线 | 看节点日志：服务器地址、证书指纹对不对，网络能不能到 8443；节点断线后会按 1、2、4…60 秒退避自动重连 |
+| 节点启动后立刻退出、退出码 2 | 设备已被 `/unpair` 或令牌无效，重新配对 |
+| `/new` 报 "timed out waiting for agent startup" | 先在那台电脑的终端里手动运行一次这个 agent，确认能启动、已登录；Windows 上检查 PowerShell 执行策略（见[快速开始](#快速开始)） |
+| `/new` 报"不在允许的目录内" | 目录不在节点的 `allowedRoots` 里，改配置后重启节点 |
+| 推送的回复不完整，或者混着工具输出 | 给这个 agent 装上 herdr 集成，节点就能直接读会话记录；见 [`docs/AGENTS.md`](docs/AGENTS.md) |
+| "提交后 10 秒内没看到它开始工作" | agent 可能还在启动或卡住了，用 `/read` 看看；确定被吞的指令节点已经自动重发过 |
+| `/yes` 说"没在等确认" | agent 已经不在确认框上了，用 `/read` 确认；确认框还在的话用 `/keys` 手动按 |
+| 长时间没说话后收不到通知 | 微信的限制：通知复用你最近一条消息的上下文，随便发一条消息就能恢复 |
 
 ## 常见问题
 
 **要买证书或域名吗？** 不用。服务器自动生成自签证书，节点按指纹校验；手机经腾讯中转，不直接连服务器。
 
-**每台电脑都要装服务器吗？** 不用，也不要。服务器只要一份，一个微信 bot 对应一个服务器；其他电脑只装节点、配对到这个服务器。
+**每台电脑都要装服务器吗？** 不用，也不要。服务器只要一份，一个微信机器人对应一个服务器；其他电脑只装节点、配对到这个服务器。
 
-**推送的回复不完整，或者混着工具输出？** 给这个 agent 装上 herdr 集成（`herdr integration install <类型>`），节点就能直接读会话记录。各 agent 的情况见 [`docs/AGENTS.md`](docs/AGENTS.md)。
+**能几个人一起用吗？** 不能。一个服务器只认绑定的那一个微信号，其他人发的消息会被忽略。
 
-**`/new` 启动 agent 超时？** 先在那台电脑的终端里手动运行一次这个 agent，确认能启动、已登录；Windows 上检查 PowerShell 执行策略（见上文）。
+**要花钱吗？** ChatPilot 本身免费、开源，也不调用任何收费接口；花的只是你本来就在用的 agent 的额度，以及云服务器的钱（如果用的话）。
+
+**电脑睡眠或关机了会怎样？** 节点离线，`/devices` 显示 ⚪，发给它的指令会提示离线。macOS 的自启配置自带 `caffeinate` 防止空闲睡眠。
+
+**节点重启时正在跑的任务会怎样？** 任务本身不受影响（它在 herdr 里跑），只是这次做完不会再推送通知，用 `/ls`、`/read` 查看结果。
+
+**不用微信能用吗？** 目前只支持微信。服务器有一个本机测试通道（HTTP 接口），主要用于开发调试，见[开发](#开发)。
+
+**为什么一定要 herdr？** 见[准备工作](#准备工作)。
 
 ## 已知限制
 
 - **iLink 不是腾讯公开文档的接口**：协议参照腾讯开源的 [openclaw-weixin](https://www.npmjs.com/package/@tencent-weixin/openclaw-weixin) 插件，腾讯修改或限制时需要跟着调整。
 - **微信不支持真正的主动推送**：通知复用你最近一条消息的 context_token，长时间不说话后能否推送取决于腾讯。
-- 节点或服务器重启时，正在等的任务不再推送结果，用 `/ls`、`/read` 查看。
-- 同一个设备只能有一个节点在线：新启动的会把旧的顶掉。
+- **会话记录是各 agent 的内部格式**：agent 升级后可能变化，读不了时自动退回读终端。
+- 节点或服务器重启时，正在等的任务不再推送结果。
+- 同一个设备只能有一个节点在线：新启动的会把旧的顶掉，被顶掉的那个自动退出。
 - 消息按顺序处理，一条很慢的指令（比如 `/new`）会让后面的消息稍等。
-- 不建议放在反向代理后面（限流会变成所有人共享），原因见 [`docs/SECURITY.md`](docs/SECURITY.md)。
+- 不建议放在反向代理后面：所有请求的来源 IP 都会变成代理，限流就成了所有人共享。原因见 [`docs/SECURITY.md`](docs/SECURITY.md)。
 
 ## 开发
 
@@ -235,7 +470,7 @@ dotnet build ChatPilot.sln     # 警告视为错误；src 下公开成员必须�
 dotnet test ChatPilot.sln      # 单元测试 + 集成测试 + 安全测试（模拟 herdr、模拟 iLink、内存服务器）
 ```
 
-不用微信也能在本机调试：服务器开测试通道，用 HTTP 模拟手机发消息。
+不用微信也能在本机调试：服务器开测试通道，用 HTTP 模拟手机发消息，`GET /dev/events` 取主动通知。
 
 ```bash
 ASPNETCORE_ENVIRONMENT=Development ChatPilot__WeChat__Enabled=false \
@@ -244,18 +479,25 @@ ChatPilot__DevChannel__Enabled=true ChatPilot__DevChannel__Token=至少16位的�
 curl -s localhost:8080/dev/chat -H 'X-ChatPilot-Dev-Token: 同上' -H 'Content-Type: application/json' -d '{"text":"/pair mac"}'
 dotnet run --project src/ChatPilot.Node -- pair --server http://127.0.0.1:8080 --code 上一步的配对码
 dotnet run --project src/ChatPilot.Node -- run
+curl -s localhost:8080/dev/events -H 'X-ChatPilot-Dev-Token: 同上'
 ```
+
+想在不影响日常 agent 的情况下实测，可以让节点用 herdr 的命名会话（配对时加 `--session 名字`），测试用的 agent 都开在那个会话里。
 
 ```text
 src/ChatPilot.Shared   协议、校验、证书指纹、安全文件写入
 src/ChatPilot.Server   服务器：微信接入、设备连接、指令解析与分发
-src/ChatPilot.Node     节点：调用 herdr、目录白名单、回复提取、连接与重连
+src/ChatPilot.Node     节点：调用 herdr、目录白名单、会话记录和终端解析、确认框导航、连接与重连
 tests/ChatPilot.Tests  测试
 deploy/                开机自启样例（systemd、launchd、Windows 计划任务）
 docs/                  设计、验收、安全、各 agent 支持细节
 ```
 
-欢迎贡献，请先看 [`CONTRIBUTING.md`](CONTRIBUTING.md)。设计和验收记录在 [`docs/PLAN.md`](docs/PLAN.md)、[`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md)。
+设计和验收记录在 [`docs/PLAN.md`](docs/PLAN.md)、[`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md)。
+
+## 贡献
+
+欢迎提 Issue 和 Pull Request。`main` 分支受保护，所有改动（包括维护者自己的）都通过 Pull Request 合并：先 fork，在自己的分支上改，跑通 `dotnet build` 和 `dotnet test`，再提 PR。详细约定见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
 
 ## 致谢
 
