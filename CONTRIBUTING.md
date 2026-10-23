@@ -16,6 +16,8 @@
 
 ## 提交代码
 
+`main` 分支受保护，所有改动（包括维护者自己的）都通过 Pull Request 合并，不能直接推送或强推。先 fork 仓库，在自己的分支上改，提交前跑通：
+
 ```bash
 dotnet build ChatPilot.sln          # 警告视为错误；src 下公开成员必须有 XML 文档注释
 dotnet test ChatPilot.sln           # 单元测试 + 集成测试 + 安全测试
