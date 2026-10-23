@@ -48,7 +48,7 @@ internal static class SampleScreens
 
     /// <summary>"信任此目录"确认框：默认选中的是 No, exit。</summary>
     public const string TrustDialog = """
-        huzitao@MacBook-Pro ws2 % claude
+        me@MacBook-Pro ws2 % claude
         ───────────────────────────────────────────────────────────────────────────────
          Accessing workspace:
          /private/tmp/scratchpad/ws2
