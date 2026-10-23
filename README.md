@@ -89,6 +89,8 @@ sudo -u chatpilot env ChatPilot__DataDir=/var/lib/chatpilot /opt/chatpilot/chatp
 
 日志里会打印**证书指纹**（`sha256:…`），节点配对时要用。也可以运行 `chatpilot-server fingerprint` 查看。
 
+**只有一台电脑时，服务器可以和节点放在同一台 Windows 上**：它只往外连腾讯取消息，不需要公网 IP。把 `appsettings.json` 里的 `ListenAddress` 改成 `127.0.0.1`、`Tls.Enabled` 改成 `false`、`PublicUrl` 填 `http://127.0.0.1:8443`，用 [`deploy/windows/install-server-task.ps1`](deploy/windows/install-server-task.ps1) 注册成登录后自启；没绑定微信时它会把登录二维码存到 `~/.chatpilot/server/wechat-login.png`，用手机微信扫这张图即可。以后要接入其他电脑，再搬到云服务器。
+
 配置在 `appsettings.json` 的 `ChatPilot` 节，也可以用环境变量覆盖：
 
 | 配置 | 默认 | 说明 |

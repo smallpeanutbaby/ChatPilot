@@ -1,5 +1,5 @@
 using System.Globalization;
-using System.Net.Http.Json;
+using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text.Json;
 using ChatPilot.Server.Options;
@@ -115,9 +115,13 @@ public sealed class ILinkClient(HttpClient http, IOptions<ServerOptions> options
 
     private HttpRequestMessage Post(Uri uri, object body, string? token)
     {
+        // 先序列化成字节、带 Content-Length 发送：JsonContent 不预先算长度，会用分块传输（chunked），腾讯的网关对此返回 HTTP 412。
         var request = new HttpRequestMessage(HttpMethod.Post, uri)
         {
-            Content = JsonContent.Create(body, options: ILinkConstants.Json),
+            Content = new ByteArrayContent(JsonSerializer.SerializeToUtf8Bytes(body, ILinkConstants.Json))
+            {
+                Headers = { ContentType = new MediaTypeHeaderValue("application/json") },
+            },
         };
         AddCommonHeaders(request);
         request.Headers.TryAddWithoutValidation("AuthorizationType", "ilink_bot_token");

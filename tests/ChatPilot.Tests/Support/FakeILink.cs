@@ -38,10 +38,16 @@ internal sealed class FakeILink : HttpMessageHandler
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
+        // 和真实的 iLink 一样：请求体没有 Content-Length（分块传输）时返回 412。要在读请求体之前判断，读过之后长度就已知了。
+        var chunked = request.Content is not null && request.Content.Headers.ContentLength is null;
         var body = request.Content is null ? "" : await request.Content.ReadAsStringAsync(cancellationToken);
         var headers = request.Headers.ToDictionary(h => h.Key, h => string.Join(",", h.Value), StringComparer.OrdinalIgnoreCase);
         var uri = request.RequestUri ?? throw new InvalidOperationException("缺少地址");
         Requests.Enqueue(new Request(request.Method, uri, body, headers));
+        if (chunked)
+        {
+            return new HttpResponseMessage(HttpStatusCode.PreconditionFailed);
+        }
 
         object response = uri.AbsolutePath switch
         {

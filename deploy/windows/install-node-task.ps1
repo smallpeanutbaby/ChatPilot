@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   ChatPilot 节点：Windows 登录后自动启动（计划任务，以当前用户身份运行）。
 
