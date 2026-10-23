@@ -1,0 +1,5 @@
+# 这些文件要在 Linux / macOS 上原样使用，不管在哪个系统上检出，都保持 LF 换行：
+# Windows 上开着 core.autocrlf 时，带 CR 的 systemd 服务文件会让路径末尾多一个 \r，服务起不来。
+*.sh       text eol=lf
+*.service  text eol=lf
+*.plist    text eol=lf

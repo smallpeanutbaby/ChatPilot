@@ -22,6 +22,14 @@ for rid in $RIDS; do
       --nologo -v quiet \
       -o "$OUT/$rid/$project"
   done
+
+  # Linux 服务器：把安装脚本、systemd 服务文件和 CPU 架构标记放在一起，整个目录拷到服务器上就能运行 install-server.sh。
+  case "$rid" in
+    linux-x64|linux-arm64)
+      cp "$ROOT/deploy/linux/install-server.sh" "$ROOT/deploy/linux/chatpilot-server.service" "$OUT/$rid/server/"
+      [ "$rid" = linux-x64 ] && echo x86_64 > "$OUT/$rid/server/ARCH" || echo aarch64 > "$OUT/$rid/server/ARCH"
+      ;;
+  esac
 done
 
 echo "完成：$OUT"
