@@ -379,8 +379,11 @@ public static class NodeCli
 
     /// <summary>升级到 GitHub 上的最新版本。只有发布版（单文件程序）能升级：用源码运行的，替换掉的只是 dotnet 的启动器。</summary>
     /// <param name="cli">解析好的命令行，可带 <c>--check</c>、<c>--no-restart</c>。</param>
-    /// <returns>0 已是最新、有新版本（<c>--check</c>）或已升级；1 不能升级或没有权限替换程序。</returns>
-    /// <exception cref="UpdateException">查不到版本、下载失败或校验值不符。</exception>
+    /// <returns>
+    /// 0 已是最新、有新版本（<c>--check</c>）或已升级（包括没找到开机自启服务、服务本来就停着而没有重启）；
+    /// 1 不能升级、没有权限替换程序，或者已经换成新版本但重启服务失败。
+    /// </returns>
+    /// <exception cref="UpdateException">查不到版本、下载失败、校验值不符或另一个 <c>update</c> 正在进行。</exception>
     private static async Task<int> UpdateAsync(CommandLine cli)
     {
         cli.RejectUnknown("check", "no-restart", "config");
@@ -419,9 +422,10 @@ public static class NodeCli
         }
 
         Console.WriteLine($"下载 {latest.Version}（{NodeUpdater.AssetName(rid)}），核对校验值后替换 {self}…");
+        string? replaced;
         try
         {
-            await updater.InstallAsync(latest, CancellationToken.None).ConfigureAwait(false);
+            replaced = await updater.InstallAsync(latest, CancellationToken.None).ConfigureAwait(false);
         }
         catch (UnauthorizedAccessException)
         {
@@ -429,17 +433,42 @@ public static class NodeCli
         }
 
         Console.WriteLine($"✅ 已升级到 {latest.Version}");
+        var restarter = ServiceRestarter.ForThisComputer();
         if (cli.Has("no-restart"))
         {
-            Console.WriteLine("   " + ServiceRestarter.ManualHint());
+            Console.WriteLine("   " + restarter.ManualHint());
             return 0;
         }
 
-        var restarted = await ServiceRestarter.TryRestartAsync(self, CancellationToken.None).ConfigureAwait(false);
-        Console.WriteLine(restarted is null
-            ? "   没找到运行这个程序的开机自启服务。" + ServiceRestarter.ManualHint()
-            : $"   已重启{restarted}，新版本正在运行。正在等的任务会接着跟踪");
+        var (exitCode, message) = DescribeRestart(
+            await restarter.RestartAsync(self, replaced, CancellationToken.None).ConfigureAwait(false),
+            restarter.ManualHint());
+        if (exitCode != 0)
+        {
+            return Fail(message);
+        }
+
+        Console.WriteLine(message);
         return 0;
+    }
+
+    /// <summary>把重启服务的结果写成给用户看的话，并决定 <c>update</c> 的退出码。</summary>
+    /// <param name="result">重启的结果。</param>
+    /// <param name="manualHint">没重启或重启失败时，告诉用户怎么自己重启，见 <see cref="ServiceRestarter.ManualHint"/>。</param>
+    /// <returns>
+    /// 退出码和要打印的话：已重启、没找到服务、服务本来就停着（不替用户打开）都是 0；
+    /// 重启失败是 1（这时节点可能停着，也可能还是旧版本在运行，脚本要能看出来）。
+    /// </returns>
+    internal static (int ExitCode, string Message) DescribeRestart(RestartResult result, string manualHint)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        return result.Status switch
+        {
+            RestartStatus.Restarted => (0, $"   已重启{result.Service}，新版本正在运行。正在等的任务会接着跟踪"),
+            RestartStatus.NotRunning => (0, $"   {result.Service} 现在没在运行（可能是你自己停掉的），没有替你启动。要启动的话运行：{result.Detail}"),
+            RestartStatus.NotFound => (0, "   没找到运行这个程序的开机自启服务" + (result.Detail is { } detail ? $"（{detail}）" : "") + "。" + manualHint),
+            _ => (1, $"已经换成新版本，但重启{result.Service} 失败了：{result.Detail}\n   节点现在可能停着，也可能还是旧版本在运行。{manualHint}"),
+        };
     }
 
     /// <summary>节点运行时的日志：Information 级别，单行、带时间戳输出到控制台（开机自启时由服务管理器收集）。</summary>
