@@ -175,7 +175,9 @@ public static class NodeCli
 
         var events = new AgentEventQueue(loggerFactory.CreateLogger<AgentEventQueue>());
         var replies = new ReplyService(herdr, config, loggerFactory.CreateLogger<ReplyService>());
-        await using var tracker = new PromptTracker(herdr, replies, events, config, loggerFactory.CreateLogger<PromptTracker>());
+        var tasks = new TrackedTasks(TrackedTasks.PathFor(configPath), loggerFactory.CreateLogger<TrackedTasks>());
+        await using var tracker = new PromptTracker(herdr, replies, events, config, loggerFactory.CreateLogger<PromptTracker>(), tasks: tasks);
+        tracker.ResumeTrackedTasks();
         var executor = new CommandExecutor(herdr, paths, tracker, replies, config, loggerFactory.CreateLogger<CommandExecutor>());
         var connection = new ServerConnection(
             ServerEndpoint.WebSocketUri(new Uri(config.ServerUrl)),

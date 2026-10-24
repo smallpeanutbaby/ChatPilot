@@ -25,6 +25,7 @@ public sealed record HerdrAgentSession(string Kind, string Value);
 /// <param name="Title">终端标题。</param>
 /// <param name="Session">会话记录引用；herdr 的 agent 集成没装时为 null。</param>
 /// <param name="StateChangeSeq">状态变化序号，每变一次加一；用来判断提交指令后 agent 有没有开始干活。</param>
+/// <param name="TerminalId">终端 ID，例如 <c>term_65dcacf573c40f</c>。herdr 重启后 pane ID 会从头编号，终端 ID 不会重复，用它确认还是同一个终端。</param>
 public sealed record HerdrAgent(
     string PaneId,
     string? Name,
@@ -34,7 +35,8 @@ public sealed record HerdrAgent(
     string? Cwd,
     string? Title,
     HerdrAgentSession? Session,
-    long StateChangeSeq = 0)
+    long StateChangeSeq = 0,
+    string? TerminalId = null)
 {
     /// <summary>空闲或已完成，都表示可以接收新指令。</summary>
     public bool IsReady => Status is AgentStatus.Idle or AgentStatus.Done;
@@ -68,7 +70,8 @@ public sealed record HerdrAgent(
             GetString(element, "foreground_cwd") ?? GetString(element, "cwd"),
             GetString(element, "terminal_title_stripped"),
             session,
-            seq);
+            seq,
+            GetString(element, "terminal_id"));
     }
 
     /// <summary>安全地取字符串字段：不是对象、没有这个字段或字段不是字符串时返回 null。</summary>
