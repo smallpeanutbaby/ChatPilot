@@ -4,7 +4,6 @@ using ChatPilot.Server.Telegram;
 using ChatPilot.Shared.Protocol;
 using ChatPilot.Tests.Support;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 
 namespace ChatPilot.Tests.Server;
@@ -80,22 +79,33 @@ public class FeatureReviewUnitTests
     [Fact]
     public async Task A_hanging_channel_neither_delays_nor_overflows_the_other_one()
     {
-        // 审查 #8：一个通道卡住，另一个通道的通知照常、一条不少地发出。
+        // 审查 #8：一个通道卡住、队列排满之后，另一个通道的通知照常、一条不少地发出。
+        // 一条一条地发、等正常的通道收到再发下一条：一次塞进 150 条的话，慢机器上正常通道的发送任务还没开始，
+        // 它自己的队列也会排满，测的就不是"互不影响"了。
+        var logs = new CapturingLoggerProvider();
+        using var factory = new LoggerFactory([logs]);
         var registry = new ChatChannelRegistry();
         var stuck = new TestChannel("Telegram") { Hang = true };
         var healthy = new TestChannel("微信");
         registry.Register(stuck);
         registry.Register(healthy);
-        using var notifier = new Notifier(registry, NullLogger<Notifier>.Instance);
+        using var notifier = new Notifier(registry, factory.CreateLogger<Notifier>());
 
         for (var i = 0; i < 150; i++)
         {
             notifier.Enqueue($"通知 {i}");
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+            while (healthy.Received.Count <= i)
+            {
+                Assert.True(DateTime.UtcNow < deadline, $"正常的通道没有收到第 {i + 1} 条");
+                await Task.Delay(1);
+            }
         }
 
-        await DevChat.EventuallyAsync(() => Task.FromResult(healthy.Received.Count == 150), "正常的通道应该收到全部 150 条");
         Assert.Equal(Enumerable.Range(0, 150).Select(i => $"通知 {i}"), healthy.Received);
         Assert.Single(stuck.Received);
+        Assert.Contains(logs.Lines, l => l.Contains("Telegram 的通知队列已满", StringComparison.Ordinal));
+        Assert.DoesNotContain(logs.Lines, l => l.Contains("微信 的通知队列已满", StringComparison.Ordinal));
     }
 
     [Fact]
