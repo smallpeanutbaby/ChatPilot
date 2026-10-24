@@ -108,8 +108,9 @@ public static class ILinkConstants
         // 消息 ID 是 uint64，用 ulong 接收不丢精度；服务端偶尔用字符串表示数字。
         NumberHandling = JsonNumberHandling.AllowReadingFromString,
 
-        // 中文和标点按原样写成 UTF-8，和腾讯官方插件的 JSON.stringify 一致。默认的编码器会转成 \uXXXX，
-        // 真机上消息在中文引号（“）处被截断。这里的 JSON 只发给 iLink，不会嵌进网页，不需要 HTML 安全的转义。
+        // 中文和标点按原样写成 UTF-8（腾讯官方插件的 JSON.stringify 也是这样）。默认的编码器会转成 \uXXXX，
+        // 真机上消息在中文引号（“）处被截断。基本平面以外的字符（📨 这类 emoji）和控制字符仍会转义，
+        // 改动前就是这样，真机显示正常。这里的 JSON 只发给 iLink，不会嵌进网页，不需要 HTML 安全的转义。
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
 }

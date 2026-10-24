@@ -229,7 +229,7 @@ public static partial class ApprovalNavigator
     /// 会扩大权限的选项：以后不再询问、全部允许、整个会话 / 工作区 / 项目都允许、永久或全局生效、自动执行、加白名单、跳过权限检查等。
     /// 这是黑名单，新 agent 的新措辞可能漏掉，所以宁可多拦：拦错了只是让用户用 /keys 自己选。
     /// </summary>
-    [GeneratedRegex(@"don'?t ask|do not ask|always|\ball\b|auto|bypass|skip|every|remember|session|workspace|project|permanent|global|forever|future|persist|allowlist|whitelist|yolo|不再|始终|总是|全部|所有|自动|跳过|会话|工作区|项目|永久|全局|以后|今后|永远|白名单", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"don'?t ask|do not ask|always|\ball\b|auto|bypass|skip|every|remember|session|conversation|thread|chat|workspace|project|permanent|global|forever|future|persist|allowlist|whitelist|yolo|不再|始终|总是|全部|所有|自动|跳过|会话|对话|聊天|工作区|项目|永久|全局|以后|今后|永远|白名单", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex EscalatingRegex();
 
     /// <summary>拒绝 / 取消类的选项：No、Deny、Reject、Cancel、Skip、Exit、Keep（不删除）、否、拒绝、取消、跳过、退出。</summary>

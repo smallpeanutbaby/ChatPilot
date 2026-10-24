@@ -374,6 +374,7 @@ public class ApprovalNavigatorTests
     [InlineData("Yes, and trust this project permanently")]
     [InlineData("Yes (globally)")]
     [InlineData("允许，以后都不用问")]
+    [InlineData("Yes, and allow this host for this conversation")]
     public void Persistent_grants_are_never_picked(string grant) =>
         Assert.Equal(-1, ApprovalNavigator.PickApproveOption([grant, "No"]));
 

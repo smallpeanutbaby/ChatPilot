@@ -32,6 +32,8 @@ ChatPilot 通过 [herdr](https://herdr.dev) 操作 agent，所以 herdr 能管�
 
 只做"这一次同意"：优先选纯粹的 Yes / Allow，其次是"仅这一次"（Allow once、Run (once)），再其次是其他同意类选项。"不再询问""总是允许""本会话 / 本工作区都允许""加入白名单""自动执行"这类会扩大权限的选项一律不自动选，只剩这类选项时会列出来，让你用 `/keys` 自己选。
 
+只有选项里同时有"同意"类和"拒绝 / 取消"类（No、Deny、Reject、Cancel、Skip、Keep、否、拒绝、取消……）才当作确认框，免得把 agent 回复里的编号列表当成确认框去按键。没有拒绝类选项的确认框（比如 Claude Code 询问是否启用 MCP 服务器）不会自动处理，请用 `/keys`。另外 agent 必须处在"等你确认"状态，`/yes`、`/no` 才会按键。
+
 横排按钮（opencode / kilo 的 Allow once · Allow always · Reject）在纯文本里看不出选中的是哪个，不自动处理，请用 `/keys`。
 
 ## 能启动的类型
