@@ -22,7 +22,8 @@ public interface IAgentEventSink
 /// <list type="bullet">
 /// <item>每个 agent 同时最多一个后台跟踪任务（按 pane ID 去重），总数不超过 <see cref="MaxWatchers"/>，防止后台 herdr 进程无限堆积。</item>
 /// <item>任务一旦停下就一定会上报一个事件：整理回复失败时也会上报，内容改为提示用 /read 查看。</item>
-/// <item>跟踪中的任务记在 <see cref="TrackedTasks"/> 里，结果发给服务器之后才删；节点重启后用 <see cref="ResumeTrackedTasks"/> 接着跟踪。</item>
+/// <item>跟踪中的任务记在 <see cref="TrackedTasks"/> 里，结果发给服务器之后才删；节点重启后用 <see cref="ResumeTrackedTasks"/> 接着跟踪，
+/// 还没送到服务器的结果原样再发。</item>
 /// <item>agent 正在干活（或者已经有任务在跟踪、正有一条指令在提交）时发来的指令进 <see cref="PromptQueue"/> 排队，
 /// 由每个 pane 一个的后台泵在它空闲、没有别的跟踪时逐条发出，不会把文字敲进正在干活的终端，也不会两条同时敲进去。</item>
 /// </list>
@@ -105,9 +106,6 @@ public sealed class PromptTracker : IAsyncDisposable
     /// 记下终端 ID 是因为 herdr 重启后 pane ID 从头编号、状态序号也重新计，旧的序号不能拿来比；条数太多时整个清空。
     /// </summary>
     private readonly ConcurrentDictionary<string, (string? TerminalId, long Seq)> _reportedSeq = new(StringComparer.Ordinal);
-
-    /// <summary>结果已经上报、还没发到服务器的任务：跟踪结束时不能删它们的记录。</summary>
-    private readonly ConcurrentDictionary<Guid, byte> _awaitingDelivery = new();
 
     /// <summary>agent 刚就绪后、重发被吞的指令前、排队的指令发出前都等这么久，等界面准备好。</summary>
     private readonly TimeSpan _initialPromptGrace;
@@ -375,11 +373,18 @@ public sealed class PromptTracker : IAsyncDisposable
     /// <summary>
     /// 节点启动时调用：接着跟踪重启前没做完的任务。还是同一个终端里的同一类 agent 才接着跟踪；
     /// 它在节点停着的时候已经做完的话，直接上报结果。超过等待上限（<see cref="NodeConfig.PromptWaitHours"/>）的任务丢掉。
+    /// 重启前已经上报、还没送到服务器的结果原样再发一次。
     /// </summary>
     public void ResumeTrackedTasks()
     {
         foreach (var task in _tasks.Snapshot())
         {
+            if (task.Result is { } result)
+            {
+                _sink.Publish(result, () => _tasks.Remove(task.Id));
+                continue;
+            }
+
             Track(() => ResumeAsync(task, _stopping.Token));
         }
 
@@ -456,7 +461,7 @@ public sealed class PromptTracker : IAsyncDisposable
         }
     }
 
-    /// <summary>记下开始跟踪的任务（替换这个 agent 之前的任务）。</summary>
+    /// <summary>记下开始跟踪的任务（替换这个 agent 之前还在跟踪的任务；已经有结果、等着送到服务器的不动）。</summary>
     /// <param name="agent">提交前的 agent 状态，记下它的状态序号。</param>
     /// <param name="prompt">交给它的文字；回应确认框之后继续跟踪时为 null。</param>
     /// <returns>记下的任务。</returns>
@@ -579,7 +584,8 @@ public sealed class PromptTracker : IAsyncDisposable
 
                 // 没上报任何结果就结束了（agent 不见了、确认后直接回到空闲、节点在退出），任务记录也就没用了。
                 // 节点退出时保留：重启后接着跟踪。
-                if (!_stopping.IsCancellationRequested && _tasks.Find(agent.PaneId) is { } task && !_awaitingDelivery.ContainsKey(task.Id))
+                // 已经上报了结果的记录不算（Find 不返回它们），等结果送到服务器再删。
+                if (!_stopping.IsCancellationRequested && _tasks.Find(agent.PaneId) is { } task)
                 {
                     _tasks.Remove(task.Id);
                 }
@@ -811,7 +817,7 @@ public sealed class PromptTracker : IAsyncDisposable
     }
 
     /// <summary>
-    /// 上报事件。这个 agent 的任务记录等事件确实发到服务器之后再删，发出之前节点退出的话，重启后会再查一次。
+    /// 上报事件。这个 agent 的任务记录记下这个结果，等事件确实发到服务器之后再删；发出之前节点退出的话，重启后原样再发一次。
     /// pane 已经被 <see cref="Forget"/> 的话不上报（关闭前最后一刻的跟踪结果没有意义）。
     /// </summary>
     /// <param name="kind">事件种类。</param>
@@ -831,18 +837,7 @@ public sealed class PromptTracker : IAsyncDisposable
             return;
         }
 
-        Action? delivered = null;
         var task = _tasks.Find(agent.PaneId);
-        if (task is not null)
-        {
-            _awaitingDelivery[task.Id] = 0;
-            delivered = () =>
-            {
-                _tasks.Remove(task.Id);
-                _awaitingDelivery.TryRemove(task.Id, out _);
-            };
-        }
-
         if (_reportedSeq.Count >= MaxWatchers * 8)
         {
             _reportedSeq.Clear();
@@ -856,6 +851,14 @@ public sealed class PromptTracker : IAsyncDisposable
             Summarize(task?.Prompt),
             task?.Since,
             _queue.Count(agent.PaneId));
+
+        // 结果记进任务记录：送到服务器之前节点重启的话原样再发，这期间这个 pane 开始的新任务也不会把它替换掉。
+        Action? delivered = null;
+        if (task is not null && _tasks.Complete(task.Id, agentEvent))
+        {
+            delivered = () => _tasks.Remove(task.Id);
+        }
+
         _sink.Publish(agentEvent, delivered);
     }
 

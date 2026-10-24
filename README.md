@@ -526,7 +526,7 @@ ChatPilot 默认只通知通过它派的活。在电脑前开了个长任务、�
 | `maxReplyChars` | `12000` | 推送回复的最大字数（500–16000），超出时保留结尾 |
 | `gitPath` | `git` | `/diff` 用的 git；开机自启时 PATH 可能很短，找不到时写绝对路径 |
 
-节点配置旁边还有几个它自己维护的文件（同样是 600）：`node.tasks.json` 正在跟踪的任务，`node.queue.json` 排队的指令，`node.watch.json` 在盯哪些 agent。
+节点配置旁边还有几个它自己维护的文件（同样是 600）：`node.tasks.json` 正在跟踪的任务（和做完了、还没送到服务器的结果），`node.queue.json` 排队的指令，`node.watch.json` 在盯哪些 agent。
 
 `launchers` 用来接入 herdr 不能直接启动的命令，例如包装过的启动脚本。节点会在新终端里运行 `command`，等 herdr 识别出 `detectAs` 类型的 agent：
 
