@@ -12,7 +12,7 @@
 
 日志里不会写令牌、配对码和消息内容，但贴出来之前还是请自己看一遍。
 
-**安全问题请不要公开提 Issue**，私下联系维护者，说明复现方式；威胁模型见 [`docs/SECURITY.md`](docs/SECURITY.md)。
+**安全问题请不要公开提 Issue**：在 GitHub 仓库的 Security 页面点 "Report a vulnerability" 私下报告，说明复现方式；威胁模型见 [`docs/SECURITY.md`](docs/SECURITY.md)。
 
 ## 提交代码
 

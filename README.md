@@ -157,13 +157,18 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\install-node-task.ps1 -N
 ```bash
 # 在打包的电脑上：打出来的 artifacts/linux-x64/server/ 里已经带好了安装脚本和服务文件
 RIDS="linux-x64" scripts/publish.sh            # ARM 服务器用 linux-arm64
-scp -r artifacts/linux-x64/server 你的服务器:/tmp/chatpilot
+ssh 你的服务器 'rm -rf ~/chatpilot-upload'       # 先删掉上次上传的，否则 scp 会把新包套进旧目录里
+scp -r artifacts/linux-x64/server 你的服务器:~/chatpilot-upload
 
 # 在服务器上
-sudo bash /tmp/chatpilot/install-server.sh --public-url https://服务器IP:8443
+sudo bash ~/chatpilot-upload/install-server.sh --public-url https://服务器IP:8443
 ```
 
-脚本会：建 `chatpilot` 系统用户和目录 → 安装程序和 systemd 服务 → 没绑定过微信时在终端里显示二维码让你扫 → 用 ufw / firewalld 放行 8443 → 启动 → 打印**证书指纹**（`sha256:…`，节点配对时要用）。再次运行就是升级：替换程序、重启服务，已有的配置、绑定和证书都保留。
+脚本会：检查环境（CPU 架构、ICU 库、参数格式）→ 建 `chatpilot` 系统用户和目录 → 安装程序和 systemd 服务 → 没绑定过微信时在终端里显示二维码让你扫 → 用 ufw / firewalld 放行端口 → 启动并做健康检查 → 打印**证书指纹**（`sha256:…`，节点配对时要用）。
+
+- 再次运行就是升级：替换程序、重启服务；已有的 `appsettings.json`、微信绑定和证书都保留。每次都要带上 `--public-url`，服务文件会按它重新生成。
+- `appsettings.json` 里改过端口的话，加 `--port 端口`，健康检查和防火墙都用它。
+- 服务器程序需要系统的 ICU 库，大多数发行版自带；最小安装的系统缺的话脚本会提示安装命令。
 
 <details>
 <summary>不用脚本，手动安装</summary>
@@ -171,11 +176,11 @@ sudo bash /tmp/chatpilot/install-server.sh --public-url https://服务器IP:8443
 ```bash
 sudo useradd --system --home /var/lib/chatpilot --shell /usr/sbin/nologin chatpilot
 sudo mkdir -p /opt/chatpilot /var/lib/chatpilot && sudo chown chatpilot: /var/lib/chatpilot && sudo chmod 700 /var/lib/chatpilot
-sudo cp /tmp/chatpilot/chatpilot-server /tmp/chatpilot/appsettings.json /opt/chatpilot/ && sudo chmod +x /opt/chatpilot/chatpilot-server
+sudo cp ~/chatpilot-upload/chatpilot-server ~/chatpilot-upload/appsettings.json /opt/chatpilot/ && sudo chmod +x /opt/chatpilot/chatpilot-server
 sudo -u chatpilot env ChatPilot__DataDir=/var/lib/chatpilot /opt/chatpilot/chatpilot-server login   # 扫码绑定微信
 
 # 把 service 文件里的 ChatPilot__PublicUrl 改成 https://服务器IP:8443，再注册成服务
-sudo cp /tmp/chatpilot/chatpilot-server.service /etc/systemd/system/ && sudo systemctl daemon-reload
+sudo cp ~/chatpilot-upload/chatpilot-server.service /etc/systemd/system/ && sudo systemctl daemon-reload
 sudo systemctl enable --now chatpilot-server
 journalctl -u chatpilot-server -f    # 看日志；记下打印出来的证书指纹 sha256:…
 ```
@@ -183,7 +188,7 @@ journalctl -u chatpilot-server -f    # 看日志；记下打印出来的证书�
 </details>
 
 - 安全组 / 防火墙只放行 **8443/tcp**（和你的 SSH 端口）；SSH 建议只允许密钥登录。
-- **证书不用买**：第一次启动时自动生成自签证书（10 年有效），保存在数据目录的 `server.pfx`。节点配对时记下它的指纹，以后只认这张证书。随时可以用 `chatpilot-server fingerprint` 查看指纹。
+- **证书不用买**：第一次启动时自动生成自签证书（10 年有效），保存在数据目录的 `server.pfx`。节点配对时记下它的指纹，以后只认这张证书。随时可以查看指纹：`sudo -u chatpilot env ChatPilot__DataDir=/var/lib/chatpilot /opt/chatpilot/chatpilot-server fingerprint`（要带上数据目录，否则它会在别处新生成一张证书，打出来的指纹不是服务正在用的）。
 - service 文件已经做了加固：以 `chatpilot` 用户运行、系统目录只读、只能写数据目录、不能提权。
 - 香港或海外服务器不用备案；国内服务器用域名加 443 端口需要 ICP 备案。
 
@@ -234,16 +239,21 @@ journalctl --user -u chatpilot-node -f        # 日志
 
 重新打包后，停掉服务、替换可执行文件、再启动即可。配置、微信绑定、配对关系都在数据目录里，不受影响。
 
-- 服务器：把新打的包拷上去，再运行一次 `install-server.sh`；或者手动 `sudo systemctl stop chatpilot-server` → 替换 `/opt/chatpilot/chatpilot-server` → `sudo systemctl start chatpilot-server`。
+- 服务器：按[上面的方式](#服务器linux-云服务器)重新上传（先删掉旧的 `~/chatpilot-upload`），再运行一次 `install-server.sh`，同样带上 `--public-url`；或者手动 `sudo systemctl stop chatpilot-server` → 替换 `/opt/chatpilot/chatpilot-server` → `sudo systemctl start chatpilot-server`。
 - 节点：Windows 用 `Stop-ScheduledTask` / `Start-ScheduledTask -TaskName ChatPilotNode`，macOS 用 `launchctl bootout` / `bootstrap`，Linux 用 `systemctl --user restart chatpilot-node`。
 
 服务器和节点之间的协议有版本号，升级时尽量两边一起升。
 
 ### 迁移服务器
 
-比如从"一台电脑"换到云服务器：把旧服务器数据目录里的 `state.json` 放进安装包目录（和 `install-server.sh` 放在一起）再运行安装脚本，或者手动拷到新服务器的数据目录（Linux 上是 `/var/lib/chatpilot/`，属主 `chatpilot`、权限 600）。微信绑定和已配对的设备都会跟过来，不用重新扫码。新服务器跑起来后，**旧服务器要停掉**：两个服务器同时收微信消息会互相抢。
+比如从"一台电脑"换到云服务器：
 
-`server.pfx`（证书）也一起拷的话，指纹不变，节点只需要改服务器地址；不拷的话会生成新证书，每台电脑的节点要带上新指纹重新配对一次。
+1. **先停掉旧服务器**：两个服务器同时收微信消息会互相抢。
+2. 把旧服务器数据目录（Windows 上是 `%USERPROFILE%\.chatpilot\server\`）里的 `state.json` 放进安装包目录，和 `install-server.sh` 放在一起，再运行安装脚本。微信绑定和已配对的设备都会跟过来，不用重新扫码。旧服务器开着 TLS 的话，把 `server.pfx`（证书）也放进去，指纹就不会变。
+3. 原来配对过的电脑**不用重新配对**（设备令牌还有效）：把节点配置 `~/.chatpilot/node.json` 里的 `serverUrl` 改成新地址；证书没迁移的话，`serverFingerprint` 改成新服务器打印的指纹。改完重启节点。
+4. 确认一切正常后，删掉安装包目录里的 `state.json` 和 `server.pfx`：里面有微信的 bot token。
+
+不用脚本的话，把这两个文件拷到新服务器的数据目录（Linux 上是 `/var/lib/chatpilot/`），属主 `chatpilot`、权限 600。
 
 ### 卸载
 
@@ -299,7 +309,7 @@ journalctl --user -u chatpilot-node -f        # 日志
 | ❌ `出错了` + 原因 | 提交后 10 秒没开始工作、等了太久（默认 6 小时）、读取失败等 |
 
 - 回复超过 4000 字会拆成多条，最多 4 条，再长的部分截断并提示。
-- 单条指令最长 16000 字。
+- 单条指令最长 16384 字。
 - agent 刚启动时，界面没准备好可能吞掉输入。节点会检查：确定指令被吞了（agent 没反应、屏幕上也找不到这段文字）才自动重发一次；拿不准就只提醒你，绝不让同一条指令执行两次。
 - 同一个 agent 有任务在跑时再派活，只会在最后做完时通知一次。
 
@@ -417,7 +427,7 @@ ChatPilot 能让手机远程给 agent 派活，而 agent 能读写代码、执�
 - 你的指令和 agent 的回复会经过服务器和腾讯；不要让 agent 把密钥之类的内容发到聊天里。
 - 怀疑某台电脑的令牌泄露时，`/unpair` 之后重新配对。
 
-完整的威胁模型和控制措施见 [`docs/SECURITY.md`](docs/SECURITY.md)。发现安全问题请私下联系维护者，不要公开提 Issue。
+完整的威胁模型和控制措施见 [`docs/SECURITY.md`](docs/SECURITY.md)。发现安全问题请在 GitHub 仓库的 Security 页面点 "Report a vulnerability" 私下报告，不要公开提 Issue。
 
 ## 排错
 
@@ -438,7 +448,7 @@ ChatPilot 能让手机远程给 agent 派活，而 agent 能读写代码、执�
 | 现象 | 原因和处理 |
 |---|---|
 | 微信里发消息没反应 | 看服务器日志：微信是否绑定成功；bot token 失效时会暂停 1 小时重试，一直失效就重新 `login` |
-| 绑定时要输入验证码，服务没反应 | 后台运行时没法输入，停掉服务，运行 `chatpilot-server login` 在终端里完成 |
+| 绑定时要输入验证码，服务没反应 | 后台运行时没法输入。停掉服务，在终端里登录：Linux 上是 `sudo -u chatpilot env ChatPilot__DataDir=/var/lib/chatpilot /opt/chatpilot/chatpilot-server login`，Windows 上直接运行 `chatpilot-server.exe login` |
 | `/devices` 显示设备离线 | 看节点日志：服务器地址、证书指纹对不对，网络能不能到 8443；节点断线后会按 1、2、4…60 秒退避自动重连 |
 | 节点启动后立刻退出、退出码 2 | 设备已被 `/unpair` 或令牌无效，重新配对 |
 | `/new` 报 "timed out waiting for agent startup" | 先在那台电脑的终端里手动运行一次这个 agent，确认能启动、已登录；Windows 上检查 PowerShell 执行策略（见[快速开始](#快速开始)） |

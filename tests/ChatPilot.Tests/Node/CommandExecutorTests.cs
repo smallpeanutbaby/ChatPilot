@@ -327,6 +327,25 @@ public sealed class CommandExecutorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Prompt_that_shows_up_while_waiting_to_resend_is_not_resent()
+    {
+        // 审查发现的未覆盖分支：第一次看屏幕时找不到指令，等界面准备好的这几秒里它出现了（被吃进输入框或开始显示），就不能再发。
+        var agent = _herdr.AddAgent("pi", "demo", kind: "pi");
+        _herdr.Screen = SampleScreens.PiReply;
+        _herdr.SwallowPrompts = 1;
+        _herdr.AfterRead = _ =>
+        {
+            _herdr.AfterRead = null;
+            _herdr.Screen = SampleScreens.PiReply + "\n 列出当前目录的文件";
+        };
+        Assert.True((await _executor.ExecuteAsync(new PromptCommand(agent.PaneId, "列出当前目录的文件"), CancellationToken.None)).Ok);
+
+        var ev = await _events.WaitAsync();
+        Assert.Equal(AgentEventKind.Failed, ev.Kind);
+        Assert.Single(_herdr.CallsStartingWith("agent", "prompt"));
+    }
+
+    [Fact]
     public async Task Resent_prompt_that_is_dropped_again_is_reported_once()
     {
         var agent = _herdr.AddAgent("pi", "demo", kind: "pi");
