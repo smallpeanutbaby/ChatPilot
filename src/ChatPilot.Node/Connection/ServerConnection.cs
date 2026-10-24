@@ -112,7 +112,7 @@ public sealed class ServerConnection(
     {
         var hello = new HelloMessage(
             ProtocolInfo.Version,
-            typeof(ServerConnection).Assembly.GetName().Version?.ToString(3) ?? "0.0.0",
+            Cli.NodeUpdater.CurrentVersion().ToString(),
             TextChunker.Truncate($"{RuntimeInformation.OSDescription} {RuntimeInformation.OSArchitecture}", 100),
             TextChunker.Truncate(Environment.MachineName, 64),
             LocalNetwork.Describe());

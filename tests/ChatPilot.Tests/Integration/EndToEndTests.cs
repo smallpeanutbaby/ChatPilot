@@ -40,7 +40,11 @@ public sealed class EndToEndTests : IAsyncLifetime
         // F-02 / F-03
         Assert.Contains("还没有设备", await DevChat.SendAsync(_chat, "/devices"), StringComparison.Ordinal);
         var node = await NodeHarness.PairAndStartAsync(_factory, "mac");
-        Assert.Contains("🟢 mac", await DevChat.SendAsync(_chat, "/devices"), StringComparison.Ordinal);
+        var devices = await DevChat.SendAsync(_chat, "/devices");
+        Assert.Contains("🟢 mac", devices, StringComparison.Ordinal);
+
+        // 审查 #9：/devices 里的节点版本和 chatpilot-node version 是同一个（带预发布后缀）。
+        Assert.Contains($"节点 {ChatPilot.Node.Cli.NodeUpdater.CurrentVersion()}", devices, StringComparison.Ordinal);
 
         await node.DisposeAsync();
         await DevChat.EventuallyAsync(
