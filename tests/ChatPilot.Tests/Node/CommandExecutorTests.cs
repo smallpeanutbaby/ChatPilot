@@ -539,7 +539,7 @@ public class NodeConfigTests
         DeviceId = "d_1",
         DeviceName = "mac",
         Token = "token",
-        AllowedRoots = ["/tmp"],
+        AllowedRoots = [Path.GetTempPath()],
     };
 
     [Fact]

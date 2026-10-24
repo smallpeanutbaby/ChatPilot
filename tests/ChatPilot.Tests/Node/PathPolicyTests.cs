@@ -44,7 +44,9 @@ public sealed class PathPolicyTests : IDisposable
         // 审查 #8：白名单外不存在的目录也只说"不在允许的目录内"，不泄露它是否存在。
         Assert.False(_policy.TryResolve(Path.Combine(_outside, "does-not-exist"), out _, out var error));
         Assert.Contains("不在允许的目录内", error, StringComparison.Ordinal);
-        Assert.False(_policy.TryResolve("/net/attacker-host/share", out _, out var autofs));
+        // 访问一下就会连到别的机器的路径：macOS 的 /net 自动挂载，Windows 的 UNC 共享（会带着当前用户的凭据去连）。
+        var remote = OperatingSystem.IsWindows() ? @"\\attacker-host\share" : "/net/attacker-host/share";
+        Assert.False(_policy.TryResolve(remote, out _, out var autofs));
         Assert.Contains("不在允许的目录内", autofs, StringComparison.Ordinal);
     }
 

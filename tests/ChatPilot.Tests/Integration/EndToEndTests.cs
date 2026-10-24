@@ -135,7 +135,8 @@ public sealed class EndToEndTests : IAsyncLifetime
         Assert.Contains("🚀 已在 [mac] 启动 webby（claude）", created, StringComparison.Ordinal);
         Assert.Contains("发 @mac/webby 内容", created, StringComparison.Ordinal);
 
-        Assert.Contains("不在允许的目录内", await DevChat.SendAsync(_chat, "/new mac /etc"), StringComparison.Ordinal);
+        var outside = Path.GetDirectoryName(node.Root.Path);
+        Assert.Contains("不在允许的目录内", await DevChat.SendAsync(_chat, $"/new mac {outside}"), StringComparison.Ordinal);
 
         Assert.Contains("已发送按键：down enter", await DevChat.SendAsync(_chat, "/keys tideq down enter"), StringComparison.Ordinal);
         Assert.Contains("不允许的按键", await DevChat.SendAsync(_chat, "/keys tideq ctrl+d"), StringComparison.Ordinal);

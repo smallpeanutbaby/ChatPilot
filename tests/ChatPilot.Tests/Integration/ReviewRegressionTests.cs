@@ -71,7 +71,9 @@ public sealed class ReviewRegressionTests : IAsyncLifetime
         store.Update(s => s.SelectedDeviceId = "before");
         await using (await StateFileBlocker.BlockAsync(store.FilePath))
         {
-            Assert.ThrowsAny<IOException>(() => store.Update(s => s.SelectedDeviceId = "after"));
+            // 被同名目录占住时，Windows 上抛的是 UnauthorizedAccessException，其他系统是 IOException。
+            var error = Assert.ThrowsAny<Exception>(() => store.Update(s => s.SelectedDeviceId = "after"));
+            Assert.True(error is IOException or UnauthorizedAccessException, error.GetType().Name);
             Assert.Equal("before", store.Read(s => s.SelectedDeviceId));
             Assert.False(store.UpdateBestEffort(s => s.SelectedDeviceId = "best-effort"));
             Assert.Equal("best-effort", store.Read(s => s.SelectedDeviceId));
