@@ -57,6 +57,7 @@ public sealed class ServerOptions
             : Path.GetFullPath(DataDir, AppContext.BaseDirectory);
 
     /// <summary>启动前检查配置；有问题直接拒绝启动。</summary>
+    /// <returns>每个问题一条给管理员看的说明（包括 Telegram 设置的问题）；配置没问题时为空列表。</returns>
     public IReadOnlyList<string> Validate()
     {
         var errors = new List<string>();
@@ -121,15 +122,21 @@ public sealed class ServerOptions
     }
 
     /// <summary>主人的时区：配置了并且认识就用配置的，否则用系统时区。</summary>
+    /// <returns>配置的时区；没配置或不认识时为 <see cref="TimeZoneInfo.Local"/>。</returns>
     public TimeZoneInfo ResolveTimeZone() =>
         !string.IsNullOrWhiteSpace(TimeZone) && TryFindTimeZone(TimeZone, out var zone) ? zone : TimeZoneInfo.Local;
 
     /// <summary>配置的时区不认识时给出的警告；没问题时为 null。</summary>
+    /// <returns>写进启动日志的警告文字；没配置时区或时区认识时为 null。</returns>
     public string? TimeZoneWarning() =>
         !string.IsNullOrWhiteSpace(TimeZone) && !TryFindTimeZone(TimeZone, out _)
             ? $"不认识配置的时区 TimeZone={TimeZone}（拼写不对，或者系统没装时区数据，Debian/Ubuntu 上装 tzdata），/at 按系统时区 {TimeZoneInfo.Local.Id} 计算"
             : null;
 
+    /// <summary>按 ID 找系统时区（去掉首尾空白），找不到或时区数据损坏时不抛异常。</summary>
+    /// <param name="id">时区 ID，例如 <c>Asia/Shanghai</c>。</param>
+    /// <param name="zone">找到的时区；找不到时为 <see cref="TimeZoneInfo.Utc"/>，不应使用。</param>
+    /// <returns>找到时为 <c>true</c>。</returns>
     private static bool TryFindTimeZone(string id, out TimeZoneInfo zone)
     {
         try
@@ -173,6 +180,7 @@ public sealed class TelegramOptions
     public int MaxChunks { get; set; } = 4;
 
     /// <summary>检查配置；没启用时不检查。</summary>
+    /// <returns>每个问题一条给管理员看的说明；没启用或配置没问题时为空列表。</returns>
     public IReadOnlyList<string> Validate()
     {
         if (!Enabled)

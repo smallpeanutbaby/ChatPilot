@@ -18,6 +18,12 @@ namespace ChatPilot.Server.Telegram;
 /// <item>token 无效（401）暂停 1 小时；有别的程序在收这个 bot 的消息（409）30 秒后重试；其他失败退避重试。</item>
 /// </list>
 /// </remarks>
+/// <param name="client">Telegram Bot API 客户端。</param>
+/// <param name="store">状态文件，保存长轮询的 offset。</param>
+/// <param name="dispatcher">处理主人发来的指令和图片。</param>
+/// <param name="options">服务器配置，提供 Telegram 的设置。</param>
+/// <param name="time">时间来源，用于失败后的等待，测试里可以换成假时钟。</param>
+/// <param name="logger">日志。</param>
 public sealed class TelegramChannel(
     TelegramClient client,
     StateStore store,
@@ -26,19 +32,27 @@ public sealed class TelegramChannel(
     TimeProvider time,
     ILogger<TelegramChannel> logger) : BackgroundService, IChatChannel
 {
+    /// <summary>每次长轮询最多等多久。</summary>
     private static readonly TimeSpan LongPoll = TimeSpan.FromSeconds(30);
+    /// <summary>最多排队多少条还没处理的消息；满了之后拉取循环等待，不丢消息。</summary>
     private const int InboxCapacity = 50;
+    /// <summary>连续失败几次后改成等 30 秒再试（之前每次只等 2 秒）。</summary>
     private const int MaxConsecutiveFailures = 3;
 
+    /// <summary>收到的主人消息。只有一个后台任务在读，保证按发送顺序执行。</summary>
     private readonly Channel<Inbound> _inbox = Channel.CreateBounded<Inbound>(
         new BoundedChannelOptions(InboxCapacity) { FullMode = BoundedChannelFullMode.Wait, SingleReader = true });
 
     // 记过日志的陌生用户：每个只记一次，免得被刷屏。
+    /// <summary>已经记过日志的陌生用户 ID，最多记 100 个。</summary>
     private readonly HashSet<long> _ignored = [];
 
     /// <summary>一条主人的消息：文字，或者图片（可能带说明文字）；都没有表示不支持的消息类型。</summary>
+    /// <param name="Text">文字或图片的说明文字；没有或全是空白时为 null。</param>
+    /// <param name="PhotoFileId">要下载的图片尺寸的文件 ID；不是图片时为 null。</param>
     private sealed record Inbound(string? Text, string? PhotoFileId);
 
+    /// <summary>Telegram 相关配置。</summary>
     private TelegramOptions Settings => options.Value.Telegram;
 
     /// <inheritdoc />
@@ -48,6 +62,10 @@ public sealed class TelegramChannel(
     public bool IsReady => Settings is { Enabled: true, OwnerUserId: > 0, BotToken.Length: > 0 };
 
     /// <summary>按 Telegram 的长度限制分段发给主人。</summary>
+    /// <param name="text">消息内容。</param>
+    /// <param name="cancellationToken">取消发送。</param>
+    /// <returns>各段都发完后完成的任务；通道没启用或没配置好时什么都不发。</returns>
+    /// <exception cref="TelegramException">某一段发送失败，后面的段不再发。</exception>
     public async Task SendToOwnerAsync(string text, CancellationToken cancellationToken)
     {
         if (!IsReady)
@@ -115,6 +133,9 @@ public sealed class TelegramChannel(
     }
 
     /// <summary>拉一次消息：先保存新的 offset，再把主人的消息放进队列。</summary>
+    /// <param name="stoppingToken">服务器停止时取消。</param>
+    /// <returns>这批消息都放进队列后完成的任务；队列满时会等待。</returns>
+    /// <exception cref="TelegramException">拉取失败。</exception>
     internal async Task PollOnceAsync(CancellationToken stoppingToken)
     {
         var offset = store.Read(s => s.TelegramOffset);
@@ -140,6 +161,9 @@ public sealed class TelegramChannel(
     }
 
     /// <summary>只认主人在私聊里发的消息。</summary>
+    /// <param name="message">收到的消息。图片取不超过大小上限的最大尺寸；文字优先，没有时用图片的说明文字。</param>
+    /// <param name="stoppingToken">服务器停止时取消。</param>
+    /// <returns>消息放进队列（或被忽略）后完成的任务。</returns>
     private async Task AcceptAsync(TelegramMessage message, CancellationToken stoppingToken)
     {
         var owner = Settings.OwnerUserId;
@@ -162,6 +186,12 @@ public sealed class TelegramChannel(
         await _inbox.Writer.WriteAsync(new Inbound(string.IsNullOrWhiteSpace(text) ? null : text, photo), stoppingToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// 后台任务：按顺序处理队列里的消息，把回复发回给主人。图片先暂存，再执行说明文字；
+    /// 单条消息出错只记日志（不记内容），不影响后面的消息。
+    /// </summary>
+    /// <param name="stoppingToken">服务器停止时取消。</param>
+    /// <returns>队列关闭或服务器停止后完成的任务。</returns>
     private async Task ProcessInboxAsync(CancellationToken stoppingToken)
     {
         try
@@ -196,6 +226,10 @@ public sealed class TelegramChannel(
         }
     }
 
+    /// <summary>下载图片并交给指令分发器暂存。</summary>
+    /// <param name="fileId">图片的文件 ID。</param>
+    /// <param name="stoppingToken">服务器停止时取消。</param>
+    /// <returns>要回复主人的文字：暂存结果，或者下载失败的说明。</returns>
     private async Task<string> AcceptPhotoAsync(string fileId, CancellationToken stoppingToken)
     {
         try
@@ -210,5 +244,9 @@ public sealed class TelegramChannel(
         }
     }
 
+    /// <summary>按注入的时间来源等待，测试里可以快进。</summary>
+    /// <param name="delay">等多久。</param>
+    /// <param name="stoppingToken">服务器停止时取消。</param>
+    /// <returns>等够时间后完成的任务；被取消时抛出 <see cref="OperationCanceledException"/>。</returns>
     private Task DelayAsync(TimeSpan delay, CancellationToken stoppingToken) => Task.Delay(delay, time, stoppingToken);
 }

@@ -156,11 +156,14 @@ public sealed record LastReplyCommand(string Target) : NodeCommand;
 public sealed record CommandOutcome(bool Ok, CommandError? Error, CommandData? Data)
 {
     /// <summary>成功结果。</summary>
+    /// <param name="data">结果数据。</param>
+    /// <returns><see cref="Ok"/> 为 true、带 <paramref name="data"/> 的结果。</returns>
     public static CommandOutcome Success(CommandData data) => new(true, null, data);
 
     /// <summary>失败结果。</summary>
     /// <param name="code">错误码，见 <see cref="ErrorCodes"/>。</param>
     /// <param name="message">给用户看的说明。</param>
+    /// <returns><see cref="Ok"/> 为 false、带错误原因的结果。</returns>
     public static CommandOutcome Failure(string code, string message) => new(false, new CommandError(code, message), null);
 }
 

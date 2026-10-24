@@ -62,6 +62,7 @@ public sealed class NodeConfig
     public int MaxReplyChars { get; set; } = 12000;
 
     /// <summary>检查配置是否完整、安全；有问题时返回错误说明。</summary>
+    /// <returns>所有问题的说明，每条一句；配置没问题时为空列表。</returns>
     public IReadOnlyList<string> Validate()
     {
         var errors = new List<string>();
@@ -159,15 +160,20 @@ public sealed class NodeConfig
     }
 
     /// <summary>脚本包装器（Windows 上会经过命令解释器），不能作为 herdr 可执行文件。</summary>
+    /// <param name="path">可执行文件路径。</param>
+    /// <returns>以 <c>.cmd</c>、<c>.bat</c> 或 <c>.ps1</c> 结尾（不区分大小写）时为 true。</returns>
     public static bool IsScriptWrapper(string path) =>
         path.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase)
         || path.EndsWith(".bat", StringComparison.OrdinalIgnoreCase)
         || path.EndsWith(".ps1", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>这个 agent 类型能不能用：herdr 内置类型，或者配置了启动方式的类型。</summary>
+    /// <param name="kind">agent 类型名。</param>
+    /// <returns>在 <see cref="Launchers"/> 里或是 herdr 内置类型时为 true。</returns>
     public bool IsKindAvailable(string kind) => Launchers.ContainsKey(kind) || Validation.BuiltInAgentKinds.Contains(kind);
 
     /// <summary>可用类型列表，给用户看。</summary>
+    /// <returns>herdr 内置类型和 <see cref="Launchers"/> 里的类型，去重后按字母排序。</returns>
     public IEnumerable<string> AvailableKinds() =>
         Validation.BuiltInAgentKinds.Concat(Launchers.Keys).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal);
 

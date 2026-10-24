@@ -34,8 +34,13 @@ public sealed class CommandExecutor(
     AttachmentDownloader? attachments = null,
     Func<IReadOnlyList<string>, CancellationToken, Task<int>>? wakeSender = null)
 {
+    /// <summary><c>/read</c> 返回的文字上限，超出时保留结尾。</summary>
     private const int MaxReadChars = 12000;
+
+    /// <summary><c>/read</c> 比要求的多读这么多行：底部的输入框和空行会被去掉。</summary>
     private const int ReadOverscanLines = 80;
+
+    /// <summary>自定义启动后轮询 herdr 有没有识别出 agent 的间隔。</summary>
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(500);
 
     /// <summary>普通指令的总时间预算：服务器最多等 30 秒，节点要在那之前给出结果。</summary>
@@ -45,6 +50,10 @@ public sealed class CommandExecutor(
     private TimeSpan StartBudget => TimeSpan.FromSeconds(config.AgentStartTimeoutSeconds + 20);
 
     /// <summary>执行一条指令。不会抛出异常（节点退出时的取消除外），所有失败都转成失败结果。</summary>
+    /// <param name="command">服务器发来的指令。</param>
+    /// <param name="cancellationToken">节点退出或连接断开时取消；另外按指令类型限时（<see cref="CommandBudget"/> 或启动预算）。</param>
+    /// <returns>执行结果；超时、herdr 出错、参数不合法或内部错误都是失败结果。</returns>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> 被取消。</exception>
     public async Task<CommandOutcome> ExecuteAsync(NodeCommand command, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(command);
@@ -94,6 +103,8 @@ public sealed class CommandExecutor(
     }
 
     /// <summary>把 herdr 的错误码转成协议错误码。</summary>
+    /// <param name="ex">herdr 返回的错误。</param>
+    /// <returns>带对应错误码和 herdr 错误信息的失败结果；不认识的错误码归为 herdr 错误。</returns>
     public static CommandOutcome MapHerdrError(HerdrException ex)
     {
         ArgumentNullException.ThrowIfNull(ex);
@@ -108,6 +119,10 @@ public sealed class CommandExecutor(
         return CommandOutcome.Failure(code, ex.Message);
     }
 
+    /// <summary>列出 agent，附上工作区标签、是否盯着、排队条数和当前任务的开始时间。</summary>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>agent 列表，以及是不是在盯着所有 agent。</returns>
+    /// <exception cref="HerdrException">herdr 出错，由 <see cref="ExecuteAsync"/> 转成失败结果。</exception>
     private async Task<CommandOutcome> ListAsync(CancellationToken cancellationToken)
     {
         var agents = await herdr.ListAgentsAsync(cancellationToken).ConfigureAwait(false);
@@ -124,6 +139,12 @@ public sealed class CommandExecutor(
     }
 
     /// <summary>派活（可以带图片）。图片先下载保存，路径附在文字后面；指令没交出去（比如排队满了）就把刚保存的图片删掉。</summary>
+    /// <param name="target">agent 名字或 pane ID。</param>
+    /// <param name="text">要交给 agent 的文字。</param>
+    /// <param name="media">附带的图片；不带图片的指令为 null。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>已发送或已排队的确认；参数不合法、没有 agent、在等确认（附屏幕摘要）或图片下载失败时为失败结果。</returns>
+    /// <exception cref="HerdrException">herdr 出错，由 <see cref="ExecuteAsync"/> 转成失败结果。</exception>
     private async Task<CommandOutcome> PromptAsync(string target, string text, IReadOnlyList<MediaRef>? media, CancellationToken cancellationToken)
     {
         if (InvalidTarget(target) is { } invalid)
@@ -184,6 +205,10 @@ public sealed class CommandExecutor(
     }
 
     /// <summary><c>/diff</c>：agent 工作目录里的 git 改动概要，或者一个文件的 diff。只读。</summary>
+    /// <param name="command">指令，带目标和可选的文件路径。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>改动文字；参数不合法、不支持 /diff、不知道工作目录或 git 出错时为失败结果。</returns>
+    /// <exception cref="HerdrException">herdr 出错，由 <see cref="ExecuteAsync"/> 转成失败结果。</exception>
     private async Task<CommandOutcome> DiffAsync(DiffCommand command, CancellationToken cancellationToken)
     {
         if (InvalidTarget(command.Target) is { } invalid)
@@ -221,6 +246,10 @@ public sealed class CommandExecutor(
     }
 
     /// <summary><c>/stop</c>：清空排队的指令；agent 正在干活时按 Esc 打断。在等确认或空闲时不按键。</summary>
+    /// <param name="command">指令，带目标。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>说明有没有按键、清掉了几条排队指令；目标不合法时为失败结果。</returns>
+    /// <exception cref="HerdrException">herdr 出错，由 <see cref="ExecuteAsync"/> 转成失败结果。</exception>
     private async Task<CommandOutcome> StopAsync(StopAgentCommand command, CancellationToken cancellationToken)
     {
         if (InvalidTarget(command.Target) is { } invalid)
@@ -243,6 +272,10 @@ public sealed class CommandExecutor(
     }
 
     /// <summary><c>/close</c>：关闭 agent 所在的 pane，丢掉它排队的指令和任务记录。</summary>
+    /// <param name="command">指令，带目标。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>已关闭的确认；目标不合法时为失败结果。</returns>
+    /// <exception cref="HerdrException">herdr 出错，由 <see cref="ExecuteAsync"/> 转成失败结果。</exception>
     private async Task<CommandOutcome> CloseAsync(CloseAgentCommand command, CancellationToken cancellationToken)
     {
         if (InvalidTarget(command.Target) is { } invalid)
@@ -258,6 +291,10 @@ public sealed class CommandExecutor(
     }
 
     /// <summary><c>/watch</c>、<c>/unwatch</c>：开始或停止盯一个 agent；没有目标时是这台电脑上的所有 agent。</summary>
+    /// <param name="command">指令，带可选的目标和开始还是停止。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>给用户看的说明；不支持 /watch、目标不合法或没有 agent 时为失败结果。</returns>
+    /// <exception cref="HerdrException">herdr 出错，由 <see cref="ExecuteAsync"/> 转成失败结果。</exception>
     private async Task<CommandOutcome> WatchAsync(WatchCommand command, CancellationToken cancellationToken)
     {
         if (watcher is null)
@@ -282,6 +319,9 @@ public sealed class CommandExecutor(
     }
 
     /// <summary><c>/wake</c>：在这台电脑所在的局域网里广播唤醒包。</summary>
+    /// <param name="command">指令，带要唤醒的 MAC 地址。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>发出了几个包；MAC 地址不合法或一个包都没发出去时为失败结果。</returns>
     private async Task<CommandOutcome> WakeAsync(WakeCommand command, CancellationToken cancellationToken)
     {
         if (command.MacAddresses is null || command.MacAddresses.Count is 0 or > ProtocolInfo.MaxWakeAddresses
@@ -296,6 +336,11 @@ public sealed class CommandExecutor(
             : CommandOutcome.Failure(ErrorCodes.Internal, "唤醒包没有发出去（没有可用的网卡）");
     }
 
+    /// <summary><c>/read</c>：最近的终端内容，去掉底部输入框、合并空行，超长时保留结尾。</summary>
+    /// <param name="command">指令，带目标和行数。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>终端内容（没有输出时是一句说明）；目标或行数不合法时为失败结果。</returns>
+    /// <exception cref="HerdrException">herdr 出错，由 <see cref="ExecuteAsync"/> 转成失败结果。</exception>
     private async Task<CommandOutcome> ReadAsync(ReadCommand command, CancellationToken cancellationToken)
     {
         if (InvalidTarget(command.Target) is { } invalid)
@@ -319,6 +364,14 @@ public sealed class CommandExecutor(
         return CommandOutcome.Success(new TextData(text.Length > 0 ? text : "（没有输出）"));
     }
 
+    /// <summary>
+    /// <c>/new</c>：在白名单目录里新建工作区并启动 agent；有初始说明时挂起，等它就绪再发。
+    /// 启动失败时关掉刚建的工作区，不留下半启动的终端。
+    /// </summary>
+    /// <param name="command">指令，带类型、名字、目录和初始说明（都可以省略）。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>启动的 agent、是否已就绪，以及卡在确认框时的屏幕摘要；参数不合法、目录不允许、名字重复、启动失败或超时时为失败结果。</returns>
+    /// <exception cref="HerdrException">列 agent 或建工作区时 herdr 出错，由 <see cref="ExecuteAsync"/> 转成失败结果。</exception>
     private async Task<CommandOutcome> StartAgentAsync(StartAgentCommand command, CancellationToken cancellationToken)
     {
         var kind = string.IsNullOrWhiteSpace(command.Kind) ? config.DefaultAgentKind : command.Kind.Trim();
@@ -396,6 +449,12 @@ public sealed class CommandExecutor(
     }
 
     /// <summary>herdr 内置启动。新终端的 shell 可能还没就绪，失败时重试几次。</summary>
+    /// <param name="kind">agent 类型。</param>
+    /// <param name="paneId">新工作区的 pane。</param>
+    /// <param name="name">agent 名字。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>启动后的 agent（可能卡在确认框）。</returns>
+    /// <exception cref="HerdrException">重试几次后仍然启动失败，或者超时、herdr 不可用。</exception>
     private async Task<HerdrAgent> LaunchBuiltInAsync(string kind, string paneId, string name, CancellationToken cancellationToken)
     {
         var timeout = TimeSpan.FromSeconds(config.AgentStartTimeoutSeconds);
@@ -422,6 +481,13 @@ public sealed class CommandExecutor(
     }
 
     /// <summary>自定义启动（例如 reclaude）：在终端里运行配置的命令，等 herdr 识别出 agent 后再起名。</summary>
+    /// <param name="launcher">配置的启动命令和要识别成的类型。</param>
+    /// <param name="paneId">新工作区的 pane。</param>
+    /// <param name="name">agent 名字。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>起好名的 agent。</returns>
+    /// <exception cref="TimeoutException">启动超时内 herdr 没有识别出指定类型的 agent。</exception>
+    /// <exception cref="HerdrException">herdr 出错。</exception>
     private async Task<HerdrAgent> LaunchWithCommandAsync(AgentLauncher launcher, string paneId, string name, CancellationToken cancellationToken)
     {
         await herdr.RunInPaneAsync(paneId, launcher.Command, cancellationToken).ConfigureAwait(false);
@@ -449,6 +515,11 @@ public sealed class CommandExecutor(
         return await herdr.GetAgentAsync(name, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary><c>/keys</c>：按白名单里的键；可能是在确认框里做了选择时，接着跟踪到做完再通知。</summary>
+    /// <param name="command">指令，带目标和按键。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>按了哪些键；目标不合法、按键数不对或有不允许的按键时为失败结果，一个键都不按。</returns>
+    /// <exception cref="HerdrException">herdr 出错，由 <see cref="ExecuteAsync"/> 转成失败结果。</exception>
     private async Task<CommandOutcome> SendKeysAsync(SendKeysCommand command, CancellationToken cancellationToken)
     {
         if (InvalidTarget(command.Target) is { } invalid)
@@ -479,6 +550,14 @@ public sealed class CommandExecutor(
         return CommandOutcome.Success(new AckData("已发送按键：" + string.Join(" ", command.Keys)));
     }
 
+    /// <summary>
+    /// <c>/yes</c>、<c>/no</c>：回应确认框。拒绝按 Esc；同意时选不扩大权限的同意选项（见 <see cref="ApprovalNavigator"/>），并且只同意给用户看过的那个确认框。
+    /// 按键后接着跟踪到做完再通知。
+    /// </summary>
+    /// <param name="command">指令，带目标和同意还是拒绝。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>按了什么；没在等确认、认不出确认框、没有能安全选中的选项，或者确认框不是给用户看过的那个时为失败结果，一个键都不按。</returns>
+    /// <exception cref="HerdrException">herdr 出错，由 <see cref="ExecuteAsync"/> 转成失败结果。</exception>
     private async Task<CommandOutcome> RespondAsync(RespondCommand command, CancellationToken cancellationToken)
     {
         if (InvalidTarget(command.Target) is { } invalid)
@@ -528,6 +607,10 @@ public sealed class CommandExecutor(
     /// 最近一条回复，取法和做完时推送的一样（能读会话记录就读记录）。微信的通知不保证送达，用它补看。
     /// agent 还没停下时，取到的是目前最新的一条，前面加一句说明。
     /// </summary>
+    /// <param name="command">指令，带目标。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>回复文字；目标不合法或没有 agent 时为失败结果。</returns>
+    /// <exception cref="HerdrException">herdr 出错，由 <see cref="ExecuteAsync"/> 转成失败结果。</exception>
     private async Task<CommandOutcome> LastReplyAsync(LastReplyCommand command, CancellationToken cancellationToken)
     {
         if (InvalidTarget(command.Target) is { } invalid)
@@ -551,6 +634,11 @@ public sealed class CommandExecutor(
         return CommandOutcome.Success(new TextData(note + reply));
     }
 
+    /// <summary>给 agent 改名，新名字要符合 herdr 的命名规则。</summary>
+    /// <param name="command">指令，带目标和新名字。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>改名的确认；目标或名字不合法时为失败结果。</returns>
+    /// <exception cref="HerdrException">herdr 出错，由 <see cref="ExecuteAsync"/> 转成失败结果。</exception>
     private async Task<CommandOutcome> RenameAsync(RenameAgentCommand command, CancellationToken cancellationToken)
     {
         if (InvalidTarget(command.Target) is { } invalid)
@@ -568,9 +656,14 @@ public sealed class CommandExecutor(
     }
 
     /// <summary>可能是在确认框里做选择的按键。</summary>
+    /// <param name="key">一个按键。</param>
+    /// <returns><c>enter</c>、<c>y</c> 或一位数字为 true。</returns>
     private static bool IsConfirmKey(string key) => key is "enter" or "y" || (key.Length == 1 && char.IsAsciiDigit(key[0]));
 
     /// <summary>屏幕摘要；读取失败时返回提示文字，不影响主流程。</summary>
+    /// <param name="agent">在等确认的 agent。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>屏幕摘要；读取失败时为提示用 /read 查看的文字。</returns>
     private async Task<string> ShowDialogOrNoteAsync(HerdrAgent agent, CancellationToken cancellationToken)
     {
         try
@@ -584,18 +677,31 @@ public sealed class CommandExecutor(
         }
     }
 
+    /// <summary>校验指令里的目标，在交给 herdr 之前拦下不合法的输入。</summary>
+    /// <param name="target">服务器发来的目标。</param>
+    /// <returns>目标合法时为 null；否则为参数错误的失败结果。</returns>
     private static CommandOutcome? InvalidTarget(string? target) =>
         Validation.IsAgentTarget(target)
             ? null
             : CommandOutcome.Failure(ErrorCodes.InvalidArgument, "目标必须是 agent 名字或 pane ID");
 
+    /// <summary>所有工作区的标签。</summary>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>工作区 ID 到标签的映射（标签可能为 null）。</returns>
+    /// <exception cref="HerdrException">herdr 出错。</exception>
     private async Task<Dictionary<string, string?>> WorkspaceLabelsAsync(CancellationToken cancellationToken) =>
         (await herdr.ListWorkspacesAsync(cancellationToken).ConfigureAwait(false))
             .ToDictionary(w => w.WorkspaceId, w => w.Label, StringComparer.Ordinal);
 
+    /// <summary>agent 所在工作区的标签。</summary>
+    /// <param name="labels"><see cref="WorkspaceLabelsAsync"/> 取到的标签。</param>
+    /// <param name="agent">agent。</param>
+    /// <returns>标签；agent 不知道属于哪个工作区、工作区不在列表里或没有标签时为 null。</returns>
     private static string? LabelOf(Dictionary<string, string?> labels, HerdrAgent agent) =>
         agent.WorkspaceId is not null && labels.TryGetValue(agent.WorkspaceId, out var label) ? label : null;
 
+    /// <summary>启动失败后关掉刚建的工作区，最多等 10 秒；关不掉只记日志，不掩盖原来的错误。</summary>
+    /// <param name="workspaceId">要关的工作区。</param>
     private async Task CloseQuietlyAsync(string workspaceId)
     {
         try

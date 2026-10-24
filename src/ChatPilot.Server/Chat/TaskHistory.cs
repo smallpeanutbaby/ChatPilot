@@ -34,14 +34,20 @@ public sealed class TaskHistory
     /// <summary>任务和结果摘要的长度。</summary>
     internal const int SummaryChars = 80;
 
+    /// <summary><c>history.json</c> 的序列化设置（驼峰命名）。</summary>
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
+    /// <summary>保护 <c>_entries</c> 和写盘：多台设备的事件可能同时到达。</summary>
     private readonly Lock _lock = new();
+    /// <summary><c>history.json</c> 的完整路径。</summary>
     private readonly string _path;
     private readonly ILogger<TaskHistory> _logger;
+    /// <summary>内存里的全部记录（旧的在前），每次变动后整份写盘。</summary>
     private readonly List<HistoryEntry> _entries;
 
     /// <summary>从数据目录加载；文件不存在或损坏时从空记录开始（历史不是关键数据）。</summary>
+    /// <param name="dataDirectory">服务器的数据目录。</param>
+    /// <param name="logger">日志。</param>
     public TaskHistory(string dataDirectory, ILogger<TaskHistory> logger)
     {
         _path = Path.Combine(dataDirectory, "history.json");
@@ -50,6 +56,10 @@ public sealed class TaskHistory
     }
 
     /// <summary>记下一个事件；只记做完和出错，卡在确认框的不算一个任务的结束。</summary>
+    /// <param name="deviceName">事件来自哪台设备。</param>
+    /// <param name="agentEvent">节点上报的事件。</param>
+    /// <param name="now">记作任务结束的时间。</param>
+    /// <exception cref="ArgumentNullException"><paramref name="agentEvent"/> 为 null。</exception>
     public void Record(string deviceName, AgentEvent agentEvent, DateTimeOffset now)
     {
         ArgumentNullException.ThrowIfNull(agentEvent);
@@ -86,6 +96,7 @@ public sealed class TaskHistory
     }
 
     /// <summary>所有记录（旧的在前）。</summary>
+    /// <returns>记录的副本；还没有记录时为空列表。</returns>
     public IReadOnlyList<HistoryEntry> Snapshot()
     {
         lock (_lock)
@@ -95,6 +106,8 @@ public sealed class TaskHistory
     }
 
     /// <summary>摘要：合并空白、截短。</summary>
+    /// <param name="text">原文，可以有多行。</param>
+    /// <returns>压成一行、不超过 <see cref="SummaryChars"/> 字的摘要；原文为 null 或全是空白时为 null。</returns>
     internal static string? Summarize(string? text)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -106,6 +119,10 @@ public sealed class TaskHistory
         return TextChunker.Truncate(flat, SummaryChars);
     }
 
+    /// <summary>读取保存的记录，只保留最新的 <see cref="Capacity"/> 条。</summary>
+    /// <param name="path"><c>history.json</c> 的路径。</param>
+    /// <param name="logger">读取失败时记日志。</param>
+    /// <returns>记录列表；文件不存在、读不了或内容损坏时为空列表。</returns>
     private static List<HistoryEntry> Load(string path, ILogger logger)
     {
         if (!File.Exists(path))

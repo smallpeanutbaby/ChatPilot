@@ -12,6 +12,7 @@ using System.Text.RegularExpressions;
 namespace ChatPilot.Node.Cli;
 
 /// <summary>升级失败，<see cref="Exception.Message"/> 是给用户看的原因。</summary>
+/// <param name="message">给用户看的原因。</param>
 public sealed class UpdateException(string message) : Exception(message);
 
 /// <summary>版本号：主.次.修订，可带预发布后缀（例如 <c>0.2.0-beta.1</c>）。</summary>
@@ -22,6 +23,8 @@ public sealed class UpdateException(string message) : Exception(message);
 public sealed partial record ReleaseVersion(int Major, int Minor, int Patch, string? Prerelease)
 {
     /// <summary>解析 <c>0.1.0</c>、<c>v0.1.0</c>、<c>0.2.0-beta.1</c>、<c>0.1.0+构建信息</c>。</summary>
+    /// <param name="text">版本号文本，例如程序集的 InformationalVersion 或 GitHub 发布的标签。</param>
+    /// <returns>解析出的版本（构建信息被丢掉）；为 null 或格式不对时为 null。</returns>
     public static ReleaseVersion? Parse(string? text)
     {
         var match = VersionRegex().Match(text ?? "");
@@ -35,6 +38,8 @@ public sealed partial record ReleaseVersion(int Major, int Minor, int Patch, str
     }
 
     /// <summary>比 <paramref name="other"/> 新吗。同一个版本号，正式版比预发布版新。</summary>
+    /// <param name="other">要比较的版本，通常是正在运行的版本。</param>
+    /// <returns>严格更新时为 true；相同或更旧时为 false。两个预发布后缀按序数比较。</returns>
     public bool IsNewerThan(ReleaseVersion other)
     {
         ArgumentNullException.ThrowIfNull(other);
@@ -57,6 +62,8 @@ public sealed partial record ReleaseVersion(int Major, int Minor, int Patch, str
     public override string ToString() =>
         string.Create(CultureInfo.InvariantCulture, $"{Major}.{Minor}.{Patch}") + (Prerelease is null ? "" : "-" + Prerelease);
 
+    /// <summary>可选的 <c>v</c> 前缀、三段数字（每段最多 6 位）、可选的预发布后缀和构建信息。</summary>
+    /// <returns>编译期生成的正则。</returns>
     [GeneratedRegex(@"^v?(?<major>\d{1,6})\.(?<minor>\d{1,6})\.(?<patch>\d{1,6})(?:-(?<pre>[0-9A-Za-z.-]{1,64}))?(?:\+[0-9A-Za-z.-]*)?\z", RegexOptions.CultureInvariant)]
     private static partial Regex VersionRegex();
 }
@@ -100,24 +107,38 @@ public sealed class NodeUpdater(
         "win-x64", "osx-arm64", "osx-x64", "linux-x64", "linux-arm64",
     };
 
+    /// <summary>发布里的校验文件名，内容是 <c>sha256sum</c> 的输出。</summary>
     private const string ChecksumFile = "SHA256SUMS.txt";
+
+    /// <summary>压缩包的下载上限：300 MiB，防止被一个超大文件耗尽内存。</summary>
     private const long MaxArchiveBytes = 300L * 1024 * 1024;
+
+    /// <summary>解压出来的程序的大小上限：500 MiB，防止解压炸弹。</summary>
     private const long MaxExecutableBytes = 500L * 1024 * 1024;
 
+    /// <summary>是不是 Windows 平台：决定压缩包格式（zip / tar.gz）和程序名是否带 <c>.exe</c>。</summary>
+    /// <param name="rid">运行时标识，例如 <c>win-x64</c>。</param>
+    /// <returns>以 <c>win-</c> 开头时为 true。</returns>
     private static bool IsWindowsRuntime(string rid) => rid.StartsWith("win-", StringComparison.Ordinal);
 
     /// <summary>这个平台的压缩包名，例如 <c>chatpilot-node-win-x64.zip</c>。</summary>
+    /// <param name="rid">运行时标识，例如 <c>linux-arm64</c>。</param>
+    /// <returns>Windows 是 <c>.zip</c>，其他平台是 <c>.tar.gz</c>。</returns>
     public static string AssetName(string rid) => $"chatpilot-node-{rid}{(IsWindowsRuntime(rid) ? ".zip" : ".tar.gz")}";
 
     /// <summary>压缩包里的程序名。</summary>
+    /// <param name="rid">运行时标识。</param>
+    /// <returns>Windows 上是 <c>chatpilot-node.exe</c>，其他平台是 <c>chatpilot-node</c>。</returns>
     public static string ExecutableName(string rid) => IsWindowsRuntime(rid) ? "chatpilot-node.exe" : "chatpilot-node";
 
     /// <summary>正在运行的节点的版本。</summary>
+    /// <returns>程序集的 InformationalVersion；读不到或格式不对时为 <c>0.0.0</c>。</returns>
     public static ReleaseVersion CurrentVersion() =>
         ReleaseVersion.Parse(typeof(NodeUpdater).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion)
         ?? new ReleaseVersion(0, 0, 0, null);
 
     /// <summary>访问 GitHub 用的客户端（走系统代理）。</summary>
+    /// <returns>超时 10 分钟、带 <c>chatpilot-node/版本</c> User-Agent 的客户端，由调用方释放。</returns>
     public static HttpClient CreateHttpClient()
     {
         var client = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
@@ -126,6 +147,8 @@ public sealed class NodeUpdater(
     }
 
     /// <summary>查最新的正式版本。</summary>
+    /// <param name="cancellationToken">取消查询。</param>
+    /// <returns>最新版本和它的 https 下载地址。</returns>
     /// <exception cref="UpdateException">查不到。</exception>
     public async Task<NodeRelease> GetLatestAsync(CancellationToken cancellationToken)
     {
@@ -168,6 +191,8 @@ public sealed class NodeUpdater(
     }
 
     /// <summary>下载、核对、试运行，然后替换程序。</summary>
+    /// <param name="release">要安装的版本，通常来自 <see cref="GetLatestAsync"/>。</param>
+    /// <param name="cancellationToken">取消下载和试运行。</param>
     /// <exception cref="UpdateException">任何一步不通过；这时正在用的程序没有被改动。</exception>
     public async Task InstallAsync(NodeRelease release, CancellationToken cancellationToken)
     {
@@ -211,6 +236,7 @@ public sealed class NodeUpdater(
     }
 
     /// <summary>删掉 Windows 上替换时留下的旧程序（<c>.old</c>）；还在运行、删不掉的留到下次。</summary>
+    /// <param name="executablePath">当前程序的路径；删的是它旁边的 <c>程序名.old*</c>。</param>
     public static void CleanUpOldBinaries(string executablePath)
     {
         var directory = Path.GetDirectoryName(Path.GetFullPath(executablePath));
@@ -226,6 +252,9 @@ public sealed class NodeUpdater(
     }
 
     /// <summary>运行一次 <c>程序 help</c>，30 秒内正常退出就算能运行。</summary>
+    /// <param name="path">要试运行的程序。</param>
+    /// <param name="cancellationToken">取消试运行。</param>
+    /// <returns>退出码为 0 时为 true；启动不了、超时（会结束进程）或退出码非 0 时为 false。</returns>
     public static async Task<bool> TryRunAsync(string path, CancellationToken cancellationToken)
     {
         var start = new ProcessStartInfo(path) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
@@ -262,6 +291,8 @@ public sealed class NodeUpdater(
     }
 
     /// <summary>解析 <c>sha256sum</c> 的输出：每行"校验值 两个空格 文件名"。</summary>
+    /// <param name="text">校验文件内容。</param>
+    /// <returns>文件名（去掉二进制模式的 <c>*</c>）→ 校验值；格式不对的行被跳过。</returns>
     internal static Dictionary<string, string> ParseChecksums(string text)
     {
         var sums = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -277,6 +308,11 @@ public sealed class NodeUpdater(
         return sums;
     }
 
+    /// <summary>发请求，只等到响应头；网络错误和超时转成给用户看的 <see cref="UpdateException"/>。</summary>
+    /// <param name="request">要发的请求。</param>
+    /// <param name="cancellationToken">取消请求；取消时照常抛 <see cref="OperationCanceledException"/>。</param>
+    /// <returns>响应，由调用方释放。</returns>
+    /// <exception cref="UpdateException">连不上 GitHub 或超时。</exception>
     private async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         try
@@ -289,6 +325,12 @@ public sealed class NodeUpdater(
         }
     }
 
+    /// <summary>把文件整个下载到内存，声明的长度或实际读到的字节超过上限就放弃。</summary>
+    /// <param name="url">下载地址。</param>
+    /// <param name="maxBytes">允许的最大字节数。</param>
+    /// <param name="cancellationToken">取消下载。</param>
+    /// <returns>文件内容。</returns>
+    /// <exception cref="UpdateException">返回非成功状态码、文件太大或下载中断。</exception>
     private async Task<byte[]> DownloadAsync(Uri url, long maxBytes, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
@@ -328,6 +370,9 @@ public sealed class NodeUpdater(
     }
 
     /// <summary>从压缩包里解出程序（压缩包里应该只有一个同名程序）。</summary>
+    /// <param name="archive">已经核对过校验值的压缩包内容。</param>
+    /// <param name="destination">解出的程序放在哪；非 Windows 上会设成可执行（755）。</param>
+    /// <exception cref="UpdateException">压缩包损坏、没有程序、有不止一个程序或程序大得不正常。</exception>
     private void ExtractExecutable(byte[] archive, string destination)
     {
         var name = ExecutableName(runtimeIdentifier);
@@ -376,6 +421,10 @@ public sealed class NodeUpdater(
         }
     }
 
+    /// <summary>解出一个程序之前检查：之前没找到过同名程序，大小也在上限内。</summary>
+    /// <param name="length">这个条目解压后的字节数。</param>
+    /// <param name="alreadyFound">之前是否已经解出过同名程序。</param>
+    /// <exception cref="UpdateException">压缩包里有不止一个程序，或程序超过 <see cref="MaxExecutableBytes"/>。</exception>
     private static void CheckSize(long length, bool alreadyFound)
     {
         if (alreadyFound)
@@ -390,6 +439,9 @@ public sealed class NodeUpdater(
     }
 
     /// <summary>用解出来的新程序换掉旧程序。</summary>
+    /// <param name="staged">解出来、试运行过的新程序。</param>
+    /// <param name="target">正在用的程序；Windows 上它被改名成 <c>.old</c>（或 <c>.old1</c>…<c>.old9</c>），换不上时改回去。</param>
+    /// <exception cref="UpdateException">Windows 上旁边的 <c>.old</c> 旧程序已经有 10 个，没有可用的备份名。</exception>
     private static void Replace(string staged, string target)
     {
         if (!OperatingSystem.IsWindows())
@@ -416,6 +468,8 @@ public sealed class NodeUpdater(
         }
     }
 
+    /// <summary>尽力删除文件；文件被占用（例如 Windows 上正在运行的旧程序）或没有权限时忽略。</summary>
+    /// <param name="path">要删的文件；不存在时什么也不做。</param>
     private static void TryDelete(string path)
     {
         try

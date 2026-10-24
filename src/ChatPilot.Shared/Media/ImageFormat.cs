@@ -4,6 +4,8 @@ namespace ChatPilot.Shared.Media;
 public static class ImageFormat
 {
     /// <summary>识别出的扩展名（不带点）：png、jpg、gif、webp、bmp；不是这些格式时返回 null。</summary>
+    /// <param name="data">文件内容（至少要包含文件头）。</param>
+    /// <returns><c>png</c>、<c>jpg</c>、<c>gif</c>、<c>webp</c> 或 <c>bmp</c>；认不出时为 null。</returns>
     public static string? DetectExtension(ReadOnlySpan<byte> data)
     {
         if (data.StartsWith((ReadOnlySpan<byte>)[0x89, (byte)'P', (byte)'N', (byte)'G', 0x0D, 0x0A, 0x1A, 0x0A]))

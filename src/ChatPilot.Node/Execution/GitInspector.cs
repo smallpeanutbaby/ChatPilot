@@ -5,6 +5,7 @@ using ChatPilot.Shared;
 namespace ChatPilot.Node.Execution;
 
 /// <summary>git 不可用、目录不是仓库、或者 git 返回错误。</summary>
+/// <param name="message">给用户看的原因。</param>
 public sealed class GitException(string message) : Exception(message);
 
 /// <summary>
@@ -17,14 +18,21 @@ public sealed class GitException(string message) : Exception(message);
 /// 仓库里配置的 clean 过滤器（<c>filter.*.clean</c> / <c>filter.*.process</c>）git 没有开关能关，<c>status</c> 和 <c>diff</c>
 /// 仍会运行它们，和你自己在这个目录里运行 <c>git status</c> 一样；这些配置只能由能写这台电脑的人设置，服务器改不了。
 /// </remarks>
+/// <param name="runner">运行 git 进程用的执行器。</param>
+/// <param name="gitPath">git 可执行文件（节点配置的 <c>gitPath</c>）。</param>
+/// <param name="timeout">每次运行 git 的超时。</param>
 public sealed class GitInspector(IProcessRunner runner, string gitPath, TimeSpan timeout)
 {
     /// <summary>返回的文字上限（和 /read 一样）。</summary>
     internal const int MaxChars = 12000;
 
+    /// <summary>概要里最多列这么多个改动文件，其余只报个数。</summary>
     private const int MaxStatusLines = 60;
 
     /// <summary>改动概要：分支和改了哪些文件、改动行数统计、最近几次提交。</summary>
+    /// <param name="directory">agent 的工作目录。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>给用户看的概要文字，超长时截断。</returns>
     /// <exception cref="GitException">git 不可用或目录不是仓库。</exception>
     public async Task<string> SummaryAsync(string directory, CancellationToken cancellationToken)
     {
@@ -73,6 +81,10 @@ public sealed class GitInspector(IProcessRunner runner, string gitPath, TimeSpan
     }
 
     /// <summary>一个文件相对上次提交的 diff（包括已暂存和未暂存的改动）。</summary>
+    /// <param name="directory">agent 的工作目录。</param>
+    /// <param name="path">相对工作目录的文件路径，不能有 <c>..</c>。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>diff 文字，超长时截断；没有 diff 时是一句说明（未跟踪的新文件，或者没有改动、路径不对）。</returns>
     /// <exception cref="GitException">git 不可用、目录不是仓库或路径不合法。</exception>
     public async Task<string> FileDiffAsync(string directory, string path, CancellationToken cancellationToken)
     {
@@ -96,10 +108,19 @@ public sealed class GitInspector(IProcessRunner runner, string gitPath, TimeSpan
     }
 
     /// <summary>已暂存和未暂存的改动加在一起的行数统计；仓库还没有任何提交时只统计暂存区。</summary>
+    /// <param name="directory">仓库里的目录。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns><c>git diff --stat</c> 的输出；没有改动时为空。</returns>
+    /// <exception cref="GitException">git 不可用或出错。</exception>
     private async Task<string> DiffStatAsync(string directory, CancellationToken cancellationToken) =>
         await TryRunAsync(directory, ["diff", "HEAD", "--stat=72", "--no-ext-diff", "--no-textconv", "--no-color"], cancellationToken).ConfigureAwait(false)
         ?? await RunAsync(directory, ["diff", "--cached", "--stat=72", "--no-ext-diff", "--no-textconv", "--no-color"], cancellationToken).ConfigureAwait(false);
 
+    /// <summary>确认目录存在并且在 git 仓库里，取仓库根目录。</summary>
+    /// <param name="directory">agent 的工作目录。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>仓库根目录。</returns>
+    /// <exception cref="GitException">目录不存在、不是 git 仓库，或者 git 不可用。</exception>
     private async Task<string> RepositoryRootAsync(string directory, CancellationToken cancellationToken)
     {
         if (!Directory.Exists(directory))
@@ -114,12 +135,23 @@ public sealed class GitInspector(IProcessRunner runner, string gitPath, TimeSpan
     }
 
     /// <summary>运行 git；退出码不为 0 时返回 null（例如仓库还没有提交时 <c>diff HEAD</c> 会失败）。</summary>
+    /// <param name="directory">运行 git 的目录。</param>
+    /// <param name="args">git 子命令和参数。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>标准输出；退出码不为 0 时为 null。</returns>
+    /// <exception cref="GitException">找不到 git 或运行超时。</exception>
     private async Task<string?> TryRunAsync(string directory, IReadOnlyList<string> args, CancellationToken cancellationToken)
     {
         var result = await InvokeAsync(directory, args, cancellationToken).ConfigureAwait(false);
         return result.ExitCode == 0 ? result.StandardOutput : null;
     }
 
+    /// <summary>运行 git，失败时把 git 的错误输出（截短）交给用户看。</summary>
+    /// <param name="directory">运行 git 的目录。</param>
+    /// <param name="args">git 子命令和参数。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>标准输出。</returns>
+    /// <exception cref="GitException">找不到 git、运行超时，或者退出码不为 0。</exception>
     private async Task<string> RunAsync(string directory, IReadOnlyList<string> args, CancellationToken cancellationToken)
     {
         var result = await InvokeAsync(directory, args, cancellationToken).ConfigureAwait(false);
@@ -128,6 +160,12 @@ public sealed class GitInspector(IProcessRunner runner, string gitPath, TimeSpan
             : throw new GitException("git 出错：" + Shared.Text.TextChunker.Truncate(result.StandardError.Trim(), 300));
     }
 
+    /// <summary>加上固定的全局参数（不拿可选锁、路径按字面解释、关 fsmonitor、不转义非 ASCII 路径、不上色），在 <paramref name="directory"/> 里运行 git。</summary>
+    /// <param name="directory">运行 git 的目录（用 <c>-C</c> 传入）。</param>
+    /// <param name="args">git 子命令和参数。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>git 的运行结果，退出码由调用方判断。</returns>
+    /// <exception cref="GitException">找不到 git 或运行超时。</exception>
     private async Task<ProcessResult> InvokeAsync(string directory, IReadOnlyList<string> args, CancellationToken cancellationToken)
     {
         List<string> all =
@@ -151,6 +189,9 @@ public sealed class GitInspector(IProcessRunner runner, string gitPath, TimeSpan
         }
     }
 
+    /// <summary>超过 <see cref="MaxChars"/> 时截断，并在结尾注明还剩多少字。</summary>
+    /// <param name="text">要返回给用户的文字。</param>
+    /// <returns>不超过上限的文字。</returns>
     private static string Clip(string text) =>
         text.Length <= MaxChars ? text : text[..(MaxChars - 40)].TrimEnd() + $"\n…（还有 {text.Length - MaxChars + 40} 字，截断了）";
 }

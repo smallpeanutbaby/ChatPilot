@@ -17,6 +17,11 @@ public sealed record AgentRef(string DeviceId, string DeviceName, string PaneId,
     public string Label => $"[{DeviceName}] {DisplayName}";
 
     /// <summary>从 agent 概要生成。</summary>
+    /// <param name="deviceId">agent 所在设备的 ID。</param>
+    /// <param name="deviceName">agent 所在设备的名字。</param>
+    /// <param name="agent">节点报告的 agent 概要。</param>
+    /// <returns>记着设备和 pane 的引用。</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="agent"/> 为 null。</exception>
     public static AgentRef From(string deviceId, string deviceName, AgentSummary agent)
     {
         ArgumentNullException.ThrowIfNull(agent);
@@ -28,13 +33,17 @@ public sealed record AgentRef(string DeviceId, string DeviceName, string PaneId,
 /// 对话上下文：最近打过交道的 agent（不写目标时默认用它），以及发过"在等你确认"、还没处理的 agent（<c>/yes</c> 不写目标时用）。
 /// 只记在内存里，服务器重启后清空。
 /// </summary>
+/// <param name="time">时间来源，用来让“在等确认”的记录过期，测试里可以换成假时钟。</param>
 public sealed class ConversationState(TimeProvider time)
 {
     /// <summary>"在等确认"记多久；超过的当作已经处理掉了。</summary>
     private static readonly TimeSpan BlockedLifetime = TimeSpan.FromHours(6);
 
+    /// <summary>保护 <c>_blocked</c> 和 <c>_recent</c>：聊天消息和设备事件会同时更新它们。</summary>
     private readonly Lock _lock = new();
+    /// <summary>在等确认的 agent，按设备和 pane 区分，记着收到通知的时间。</summary>
     private readonly Dictionary<(string DeviceId, string PaneId), (AgentRef Agent, DateTimeOffset At)> _blocked = [];
+    /// <summary>最近打过交道的 agent，见 <see cref="Recent"/>。</summary>
     private AgentRef? _recent;
 
     /// <summary>最近打过交道的 agent：最近给主人发过通知的，或者主人最近指定过的。</summary>
@@ -50,6 +59,8 @@ public sealed class ConversationState(TimeProvider time)
     }
 
     /// <summary>主人指定了这个 agent（派活、看输出、回应确认框……）。</summary>
+    /// <param name="agent">记为最近打过交道的 agent。</param>
+    /// <exception cref="ArgumentNullException"><paramref name="agent"/> 为 null。</exception>
     public void Touch(AgentRef agent)
     {
         ArgumentNullException.ThrowIfNull(agent);
@@ -60,6 +71,10 @@ public sealed class ConversationState(TimeProvider time)
     }
 
     /// <summary>设备上报了事件：记为最近打过交道的；卡在确认框的记下来，做完或出错的划掉。</summary>
+    /// <param name="deviceId">上报事件的设备 ID。</param>
+    /// <param name="deviceName">上报事件的设备名。</param>
+    /// <param name="agentEvent">节点上报的事件。</param>
+    /// <exception cref="ArgumentNullException"><paramref name="agentEvent"/> 为 null。</exception>
     public void OnEvent(string deviceId, string deviceName, AgentEvent agentEvent)
     {
         ArgumentNullException.ThrowIfNull(agentEvent);
@@ -79,6 +94,8 @@ public sealed class ConversationState(TimeProvider time)
     }
 
     /// <summary>主人已经回应了这个 agent 的确认框。</summary>
+    /// <param name="deviceId">agent 所在设备的 ID。</param>
+    /// <param name="paneId">agent 所在的 pane。</param>
     public void Responded(string deviceId, string paneId)
     {
         lock (_lock)
@@ -88,6 +105,8 @@ public sealed class ConversationState(TimeProvider time)
     }
 
     /// <summary>agent 被关闭了：不再把它当作默认目标，也不再记着它在等确认。</summary>
+    /// <param name="deviceId">agent 所在设备的 ID。</param>
+    /// <param name="paneId">agent 所在的 pane。</param>
     public void ForgetAgent(string deviceId, string paneId)
     {
         lock (_lock)
@@ -101,6 +120,7 @@ public sealed class ConversationState(TimeProvider time)
     }
 
     /// <summary>设备被撤销：忘掉它的 agent。</summary>
+    /// <param name="deviceId">被撤销的设备 ID。</param>
     public void ForgetDevice(string deviceId)
     {
         lock (_lock)
@@ -118,6 +138,7 @@ public sealed class ConversationState(TimeProvider time)
     }
 
     /// <summary>发过"在等你确认"、还没处理的 agent，最近的在前。</summary>
+    /// <returns>没过期的记录（过期的顺便清掉）；没有时为空列表。</returns>
     public IReadOnlyList<AgentRef> Blocked()
     {
         var cutoff = time.GetUtcNow() - BlockedLifetime;

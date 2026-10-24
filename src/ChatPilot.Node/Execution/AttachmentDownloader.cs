@@ -9,6 +9,7 @@ using ChatPilot.Shared.Security;
 namespace ChatPilot.Node.Execution;
 
 /// <summary>下载附件失败（网络、校验值不对、不是图片、写不进磁盘）。</summary>
+/// <param name="message">给用户看的原因。</param>
 public sealed class AttachmentException(string message) : Exception(message);
 
 /// <summary>
@@ -21,12 +22,17 @@ public sealed class AttachmentException(string message) : Exception(message);
 /// <item><c>.chatpilot/</c> 里放一个内容为 <c>*</c> 的 .gitignore，图片不会出现在 git 的改动里。工作目录写不进去时存到节点自己的目录。</item>
 /// </list>
 /// </remarks>
+/// <param name="http">下载用的 HTTP 客户端（带服务器证书指纹校验和超时）。</param>
+/// <param name="server">服务器地址（节点配置的 <c>serverUrl</c>）。</param>
+/// <param name="token">设备令牌，下载时放在 <c>Authorization</c> 头里。</param>
+/// <param name="fallbackDirectory">工作目录写不进去时存图片的节点自己的目录。</param>
 public sealed class AttachmentDownloader(HttpClient http, Uri server, string token, string fallbackDirectory)
 {
     /// <summary>下载并保存所有附件，返回每张图片的绝对路径（顺序和传入的一样）。</summary>
     /// <param name="attachments">附件。</param>
     /// <param name="agentDirectory">agent 的工作目录；为 null 或写不进去时存到节点自己的目录。</param>
     /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>每张图片的绝对路径；没有附件时为空列表。</returns>
     /// <exception cref="AttachmentException">任何一张下载或保存失败。</exception>
     public async Task<IReadOnlyList<string>> SaveAsync(IReadOnlyList<MediaRef> attachments, string? agentDirectory, CancellationToken cancellationToken)
     {
@@ -56,6 +62,7 @@ public sealed class AttachmentDownloader(HttpClient http, Uri server, string tok
     }
 
     /// <summary>删掉已经保存的图片（指令没交出去时用）；删不掉也不报错。</summary>
+    /// <param name="paths">要删的图片路径。</param>
     public static void DeleteQuietly(IEnumerable<string> paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -73,6 +80,9 @@ public sealed class AttachmentDownloader(HttpClient http, Uri server, string tok
     }
 
     /// <summary>把图片的保存位置附在指令后面，让 agent 自己去看。</summary>
+    /// <param name="text">原来的指令。</param>
+    /// <param name="paths">图片的保存位置。</param>
+    /// <returns>附上图片路径的指令；没有图片时原样返回。</returns>
     public static string AppendToPrompt(string text, IReadOnlyList<string> paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -81,6 +91,11 @@ public sealed class AttachmentDownloader(HttpClient http, Uri server, string tok
             : text + "\n\n（主人从手机发来了图片，请先查看：\n" + string.Join("\n", paths) + "）";
     }
 
+    /// <summary>从服务器下载一张图片，先检查附件信息，下载后核对大小和 SHA-256。</summary>
+    /// <param name="media">服务器发来的附件信息。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>核对过的图片内容。</returns>
+    /// <exception cref="AttachmentException">附件信息不合法、下载失败或超时、大小或校验值不对。</exception>
     private async Task<byte[]> DownloadAsync(MediaRef media, CancellationToken cancellationToken)
     {
         if (media.Size is <= 0 or > ProtocolInfo.MaxImageBytes || media.Id.Length is 0 or > 64 || !media.Id.All(char.IsAsciiLetterOrDigit))
@@ -125,6 +140,9 @@ public sealed class AttachmentDownloader(HttpClient http, Uri server, string tok
     }
 
     /// <summary>优先存到 agent 工作目录（agent 读它不需要额外授权），写不进去时存到节点自己的目录。</summary>
+    /// <param name="agentDirectory">agent 的工作目录；为 null、不是绝对路径或不存在时直接用节点自己的目录。</param>
+    /// <returns>建好的保存目录。</returns>
+    /// <exception cref="AttachmentException">两个目录都写不进去。</exception>
     private string PrepareDirectory(string? agentDirectory)
     {
         if (agentDirectory is not null && Path.IsPathFullyQualified(agentDirectory) && Directory.Exists(agentDirectory))
@@ -161,6 +179,9 @@ public sealed class AttachmentDownloader(HttpClient http, Uri server, string tok
     }
 
     /// <summary>下载地址：服务器地址（可以带子路径）加 <see cref="ProtocolInfo.MediaPath"/> 和 ID。</summary>
+    /// <param name="server">服务器地址。</param>
+    /// <param name="id">附件 ID。</param>
+    /// <returns>去掉查询串和片段的下载地址。</returns>
     internal static Uri MediaUri(Uri server, string id)
     {
         var basePath = server.AbsolutePath.TrimEnd('/');

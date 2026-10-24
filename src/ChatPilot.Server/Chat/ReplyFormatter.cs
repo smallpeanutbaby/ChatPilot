@@ -46,6 +46,8 @@ public static class ReplyFormatter
         """;
 
     /// <summary>agent 状态对应的图标。</summary>
+    /// <param name="status">节点报告的 agent 状态（见 <see cref="AgentSummary.Status"/>）。</param>
+    /// <returns>对应的 emoji；不认识的状态返回 <c>❔</c>。</returns>
     public static string StatusIcon(string status) => status switch
     {
         "working" => "⏳",
@@ -56,6 +58,8 @@ public static class ReplyFormatter
     };
 
     /// <summary>agent 状态的中文说明。</summary>
+    /// <param name="status">节点报告的 agent 状态（见 <see cref="AgentSummary.Status"/>）。</param>
+    /// <returns>中文说明；不认识的状态返回“未知”。</returns>
     public static string StatusText(string status) => status switch
     {
         "working" => "工作中",
@@ -66,6 +70,13 @@ public static class ReplyFormatter
     };
 
     /// <summary>agent 事件通知。</summary>
+    /// <param name="deviceName">事件来自哪台设备，显示在开头，也用来拼 <c>/yes</c>、<c>/no</c> 的目标。</param>
+    /// <param name="agentEvent">节点上报的事件。</param>
+    /// <returns>
+    /// 发给主人的通知文字：做完、等确认、出错三种之一；正文过长时截断。
+    /// 还有排队的指令时（等确认的除外）在末尾说明还剩几条。
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="agentEvent"/> 为 null。</exception>
     public static string AgentEvent(string deviceName, AgentEvent agentEvent)
     {
         ArgumentNullException.ThrowIfNull(agentEvent);
@@ -84,6 +95,8 @@ public static class ReplyFormatter
     }
 
     /// <summary>给人看的时长：不到 1 分钟、N 分钟、N 小时、N 天。</summary>
+    /// <param name="span">时长。</param>
+    /// <returns>只取最大的单位并向下取整的文字，例如 90 分钟显示为 <c>1 小时</c>。</returns>
     public static string Duration(TimeSpan span) => span switch
     {
         { TotalMinutes: < 1 } => "不到 1 分钟",
@@ -93,10 +106,16 @@ public static class ReplyFormatter
     };
 
     /// <summary><c>/last</c> 的回复：和做完时的通知用同样的长度上限。</summary>
+    /// <param name="label">agent 的显示名。</param>
+    /// <param name="text">agent 最近一条回复的原文。</param>
+    /// <returns>带标题的回复文字，正文过长时截断。</returns>
     public static string LastReply(string label, string text) =>
         $"💬 {label} 最近的回复：\n\n{TextChunker.Truncate(text, MaxEventTextChars)}";
 
     /// <summary>失败结果的回复文字。</summary>
+    /// <param name="outcome">失败的指令结果。</param>
+    /// <returns>以 <c>❌</c> 开头的错误说明；结果里没有错误信息时显示“失败了”。</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="outcome"/> 为 null。</exception>
     public static string Failure(CommandOutcome outcome)
     {
         ArgumentNullException.ThrowIfNull(outcome);

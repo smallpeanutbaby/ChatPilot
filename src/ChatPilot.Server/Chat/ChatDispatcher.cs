@@ -14,6 +14,16 @@ using Microsoft.Extensions.Options;
 namespace ChatPilot.Server.Chat;
 
 /// <summary>执行聊天指令：找设备、找 agent、发给节点、整理回复。只服务一个主人。</summary>
+/// <param name="hub">在线设备，给节点发指令。</param>
+/// <param name="store">状态文件：设备、默认设备、定时任务。</param>
+/// <param name="pairing">生成配对码。</param>
+/// <param name="identity">配对提示里要用的服务器地址和证书指纹。</param>
+/// <param name="conversation">对话上下文：不写目标时用的默认 agent、在等确认的 agent。</param>
+/// <param name="history">任务记录，给 <c>/history</c> 看。</param>
+/// <param name="media">主人暂存的图片。</param>
+/// <param name="clock">主人时区的时间。</param>
+/// <param name="options">服务器配置，提供超时等设置。</param>
+/// <param name="logger">日志。</param>
 public sealed class ChatDispatcher(
     DeviceHub hub,
     StateStore store,
@@ -47,16 +57,29 @@ public sealed class ChatDispatcher(
     /// <summary><c>/close</c> 的确认有效期。</summary>
     private static readonly TimeSpan CloseConfirmWindow = TimeSpan.FromMinutes(2);
 
+    /// <summary>让所有消息一条一条处理（见 <see cref="HandleAsync"/>）。</summary>
     private readonly SemaphoreSlim _serial = new(1, 1);
+    /// <summary>保护 <c>_lastListing</c>。</summary>
     private readonly Lock _listingLock = new();
+    /// <summary>上一次 <c>/ls</c> 列出的 agent，按序号排列，<c>@序号</c> 用它解析。</summary>
     private List<ListedAgent> _lastListing = [];
+    /// <summary>等主人确认的 <c>/close</c>；同一时间只记一个，新的替换旧的。</summary>
     private PendingClose? _pendingClose;
 
+    /// <summary><c>/ls</c> 列表里的一项。</summary>
+    /// <param name="Device">agent 所在的设备。</param>
+    /// <param name="Agent">列出时的 agent 概要。</param>
     private sealed record ListedAgent(DeviceRecord Device, AgentSummary Agent);
 
     /// <summary>发过确认提示、等主人确认的 <c>/close</c>。</summary>
+    /// <param name="DeviceId">agent 所在设备的 ID。</param>
+    /// <param name="PaneId">agent 所在的 pane。</param>
+    /// <param name="Expires">确认的截止时间。</param>
     private sealed record PendingClose(string DeviceId, string PaneId, DateTimeOffset Expires);
 
+    /// <summary>解析好的目标：在线设备上的一个 agent。</summary>
+    /// <param name="Device">agent 所在的设备。</param>
+    /// <param name="Agent">节点刚报告的 agent 概要。</param>
     private sealed record Resolved(DeviceRecord Device, AgentSummary Agent)
     {
         /// <summary>回复里显示的名字，例如 <c>[mac] tideq</c>。</summary>
@@ -72,20 +95,30 @@ public sealed class ChatDispatcher(
         public string Address => $"{Device.Name}/{Target}";
     }
 
+    /// <summary>等节点返回普通指令结果的时间。</summary>
     private TimeSpan CommandTimeout => TimeSpan.FromSeconds(options.Value.CommandTimeoutSeconds);
 
     /// <summary>
     /// 处理一条主人的消息，返回回复文字。不会抛异常（取消除外）。
     /// 所有消息严格排队、一条一条处理：先发的 <c>/use</c> 一定在后发的指令之前生效，<c>@序号</c> 用的一定是之前那次 <c>/ls</c> 的结果。
     /// </summary>
+    /// <param name="text">主人发来的原文。</param>
+    /// <param name="cancellationToken">取消处理；取消时抛出 <see cref="OperationCanceledException"/>。</param>
+    /// <returns>要回复主人的文字；出错时是错误说明。</returns>
     public Task<string> HandleAsync(string text, CancellationToken cancellationToken) =>
         SerialAsync(() => HandleCoreAsync(text, scheduled: false, cancellationToken), cancellationToken);
 
     /// <summary>执行到点的定时任务。和主人发消息一样排队处理，但不会带走主人暂存的图片。</summary>
+    /// <param name="text">定时任务的内容（<c>@目标 内容</c> 或交给管家的文字）。</param>
+    /// <param name="cancellationToken">取消处理；取消时抛出 <see cref="OperationCanceledException"/>。</param>
+    /// <returns>执行结果的文字，由调用方作为通知推送。</returns>
     public Task<string> HandleScheduledAsync(string text, CancellationToken cancellationToken) =>
         SerialAsync(() => HandleCoreAsync(text, scheduled: true, cancellationToken), cancellationToken);
 
     /// <summary>主人发来一张图片：暂存起来，等下一条派活的指令一起发出去。</summary>
+    /// <param name="data">图片的原始字节。</param>
+    /// <param name="cancellationToken">取消排队；取消时抛出 <see cref="OperationCanceledException"/>。</param>
+    /// <returns>回复主人的文字：暂存了几张、多久内有效；不是图片、太大或已满时是原因。</returns>
     public Task<string> HandleImageAsync(byte[] data, CancellationToken cancellationToken) =>
         SerialAsync(() =>
         {
@@ -95,6 +128,10 @@ public sealed class ChatDispatcher(
                 : $"🖼 收到图片（共 {count} 张待发）。接下来用 @目标 内容 派活时会一起带上，{MediaStore.Lifetime.TotalMinutes:0} 分钟内有效；不要了发 /drop");
         }, cancellationToken);
 
+    /// <summary>排队执行：等前一条消息处理完再开始。</summary>
+    /// <param name="work">要执行的处理。</param>
+    /// <param name="cancellationToken">取消排队。</param>
+    /// <returns><paramref name="work"/> 的结果。</returns>
     private async Task<string> SerialAsync(Func<Task<string>> work, CancellationToken cancellationToken)
     {
         await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -108,6 +145,11 @@ public sealed class ChatDispatcher(
         }
     }
 
+    /// <summary>解析并执行一条消息。意外异常记日志并回复“服务器内部错误”，只有取消会抛出去。</summary>
+    /// <param name="text">消息原文。</param>
+    /// <param name="scheduled">是不是定时任务；定时任务派活时不带暂存的图片。</param>
+    /// <param name="cancellationToken">取消处理。</param>
+    /// <returns>要回复的文字。</returns>
     private async Task<string> HandleCoreAsync(string text, bool scheduled, CancellationToken cancellationToken)
     {
         var command = ChatCommandParser.Parse(text);
@@ -159,6 +201,8 @@ public sealed class ChatDispatcher(
         }
     }
 
+    /// <summary><c>/devices</c>：在线状态、当前默认设备，在线的显示电脑名、系统和节点版本，离线的显示最后在线时间。</summary>
+    /// <returns>设备列表；还没有设备时是配对提示。</returns>
     private string Devices()
     {
         var devices = store.Devices();
@@ -194,6 +238,9 @@ public sealed class ChatDispatcher(
         return builder.ToString();
     }
 
+    /// <summary><c>/use 设备</c>：切换默认设备（离线设备也可以）。</summary>
+    /// <param name="name">设备名或设备 ID。</param>
+    /// <returns>切换结果；设备不存在时是提示。</returns>
     private string Use(string name)
     {
         if (store.FindDevice(name) is not { } device)
@@ -207,6 +254,10 @@ public sealed class ChatDispatcher(
             : $"👌 默认设备切换为 {device.Name}（目前离线）";
     }
 
+    /// <summary><c>/ls [设备]</c>：列出 agent 并编上序号，记下这次的列表供 <c>@序号</c> 使用。</summary>
+    /// <param name="deviceName">只列这台设备；为 null 时列出所有设备。</param>
+    /// <param name="cancellationToken">取消查询。</param>
+    /// <returns>按设备分组的 agent 列表；设备不存在或还没有设备时是提示。</returns>
     private async Task<string> ListAsync(string? deviceName, CancellationToken cancellationToken)
     {
         IReadOnlyList<DeviceRecord> devices;
@@ -304,6 +355,9 @@ public sealed class ChatDispatcher(
     }
 
     /// <summary>向每台在线设备要 agent 列表；离线的设备结果为 null。</summary>
+    /// <param name="devices">要查询的设备。</param>
+    /// <param name="cancellationToken">取消查询。</param>
+    /// <returns>每台设备一项，顺序和 <paramref name="devices"/> 相同；各设备并行查询。</returns>
     private async Task<(DeviceRecord Device, CommandOutcome? Outcome)[]> QueryAgentsAsync(IEnumerable<DeviceRecord> devices, CancellationToken cancellationToken) =>
         await Task.WhenAll(devices.Select(async d =>
             (Device: d, Outcome: hub.IsOnline(d.Id)
@@ -311,6 +365,8 @@ public sealed class ChatDispatcher(
                 : null))).ConfigureAwait(false);
 
     /// <summary><c>/pending</c>：在等确认的、在干活的（多久了、排了几条）、定时任务和暂存的图片。</summary>
+    /// <param name="cancellationToken">取消查询。</param>
+    /// <returns>按类别分段的待办；查询失败的设备单独列出；什么都没有时说明没有待办。</returns>
     private async Task<string> PendingAsync(CancellationToken cancellationToken)
     {
         var online = store.Devices().Where(d => hub.IsOnline(d.Id)).ToList();
@@ -388,6 +444,10 @@ public sealed class ChatDispatcher(
         return builder.ToString();
     }
 
+    /// <summary><c>/read [目标] [行数]</c>：看 agent 最近的终端输出。</summary>
+    /// <param name="command">解析好的指令；没写目标时用最近打过交道的 agent。</param>
+    /// <param name="cancellationToken">取消等待。</param>
+    /// <returns>终端输出；找不到目标或节点返回失败时是原因。</returns>
     private async Task<string> ReadAsync(ChatRead command, CancellationToken cancellationToken)
     {
         var (resolved, error) = await ResolveOrRecentAsync(command.Target, cancellationToken).ConfigureAwait(false);
@@ -403,6 +463,10 @@ public sealed class ChatDispatcher(
             : ReplyFormatter.Failure(outcome);
     }
 
+    /// <summary><c>/last [目标]</c>：补看 agent 最近一条回复。</summary>
+    /// <param name="command">解析好的指令；没写目标时用最近打过交道的 agent。</param>
+    /// <param name="cancellationToken">取消等待。</param>
+    /// <returns>agent 最近的回复；找不到目标或节点返回失败时是原因。</returns>
     private async Task<string> LastReplyAsync(ChatLast command, CancellationToken cancellationToken)
     {
         var (resolved, error) = await ResolveOrRecentAsync(command.Target, cancellationToken).ConfigureAwait(false);
@@ -418,6 +482,12 @@ public sealed class ChatDispatcher(
             : ReplyFormatter.Failure(outcome);
     }
 
+    /// <summary><c>@目标 内容</c>：把任务交给指定的 agent。</summary>
+    /// <param name="target">主人写的目标。</param>
+    /// <param name="text">任务内容。</param>
+    /// <param name="withImages">要不要带上暂存的图片（定时任务不带）。</param>
+    /// <param name="cancellationToken">取消等待。</param>
+    /// <returns>发送结果；找不到目标时是原因。</returns>
     private async Task<string> PromptAsync(TargetRef target, string text, bool withImages, CancellationToken cancellationToken)
     {
         var (resolved, error) = await ResolveAsync(target, cancellationToken).ConfigureAwait(false);
@@ -425,15 +495,29 @@ public sealed class ChatDispatcher(
     }
 
     /// <summary><c>/re</c>：交给最近打过交道的 agent。</summary>
+    /// <param name="text">任务内容。</param>
+    /// <param name="cancellationToken">取消等待。</param>
+    /// <returns>发送结果；还没有打过交道的 agent 或找不到它时是原因。</returns>
     private async Task<string> ReplyAsync(string text, CancellationToken cancellationToken)
     {
         var (resolved, error) = await ResolveOrRecentAsync(null, cancellationToken).ConfigureAwait(false);
         return resolved is null ? "❓ " + error : await SendPromptAsync(resolved, text, withImages: true, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>把任务发给解析好的 agent，见 <see cref="SendTextAsync"/>。</summary>
+    /// <param name="resolved">目标 agent。</param>
+    /// <param name="text">任务内容。</param>
+    /// <param name="withImages">要不要带上暂存的图片。</param>
+    /// <param name="cancellationToken">取消等待。</param>
+    /// <returns>发送结果。</returns>
     private Task<string> SendPromptAsync(Resolved resolved, string text, bool withImages, CancellationToken cancellationToken) =>
         SendTextAsync(resolved.Device, resolved.Target, text, withImages, resolved.Label, $"已发给 {resolved.Label}", notFound: null, cancellationToken);
 
+    /// <summary>不带 <c>/</c> 或 <c>@</c> 的文字：交给默认设备上名为 <see cref="ButlerName"/> 的管家。</summary>
+    /// <param name="text">原文。</param>
+    /// <param name="withImages">要不要带上暂存的图片（定时任务不带）。</param>
+    /// <param name="cancellationToken">取消等待。</param>
+    /// <returns>发送结果；没有可用的默认设备或还没有管家时是提示。</returns>
     private async Task<string> ButlerPromptAsync(string text, bool withImages, CancellationToken cancellationToken)
     {
         var (device, error) = DefaultDevice();
@@ -461,6 +545,7 @@ public sealed class ChatDispatcher(
     /// <param name="sentPhrase">直接交出去时的说法，例如"已发给 [mac] tideq"。</param>
     /// <param name="notFound">找不到目标时的回复；为 null 时用节点的说明。</param>
     /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>回复主人的文字：已发出、节点的说明（例如排队了），或失败原因（带图片时提醒图片还暂存着）。</returns>
     private async Task<string> SendTextAsync(
         DeviceRecord device, string target, string text, bool withImages, string label, string sentPhrase, string? notFound, CancellationToken cancellationToken)
     {
@@ -484,6 +569,10 @@ public sealed class ChatDispatcher(
             : $"📨 {sentPhrase}{withImageNote}，做完会通知你";
     }
 
+    /// <summary><c>/new [设备] 目录 [类型] [名字]</c>：新开工作区并启动 agent。</summary>
+    /// <param name="command">解析好的指令；没写设备时用默认设备。</param>
+    /// <param name="cancellationToken">取消等待。</param>
+    /// <returns>启动结果；设备不可用时是原因。</returns>
     private async Task<string> NewAsync(ChatNew command, CancellationToken cancellationToken)
     {
         var (device, error) = command.Device is null ? DefaultDevice() : OnlineDevice(command.Device);
@@ -496,6 +585,10 @@ public sealed class ChatDispatcher(
             .ConfigureAwait(false);
     }
 
+    /// <summary><c>/butler [设备]</c>：在节点的第一个允许目录启动名为 <see cref="ButlerName"/> 的 agent，并发给它 <see cref="ButlerInstructions"/>。</summary>
+    /// <param name="deviceName">设备名；为 null 时用默认设备。</param>
+    /// <param name="cancellationToken">取消等待。</param>
+    /// <returns>启动结果；设备不可用时是原因。</returns>
     private async Task<string> CreateButlerAsync(string? deviceName, CancellationToken cancellationToken)
     {
         var (device, error) = deviceName is null ? DefaultDevice() : OnlineDevice(deviceName);
@@ -508,6 +601,11 @@ public sealed class ChatDispatcher(
             .ConfigureAwait(false);
     }
 
+    /// <summary>让节点启动 agent（超时用 <see cref="ServerOptions.StartAgentTimeoutSeconds"/>），成功后记为最近打过交道的 agent。</summary>
+    /// <param name="device">在哪台设备上启动。</param>
+    /// <param name="command">启动参数。</param>
+    /// <param name="cancellationToken">取消等待。</param>
+    /// <returns>启动结果和派活方式；卡在确认框时附上屏幕摘要和 <c>/yes</c>、<c>/no</c> 的写法；失败时是原因。</returns>
     private async Task<string> StartAgentAsync(DeviceRecord device, StartAgentCommand command, CancellationToken cancellationToken)
     {
         var timeout = TimeSpan.FromSeconds(options.Value.StartAgentTimeoutSeconds);
@@ -526,6 +624,10 @@ public sealed class ChatDispatcher(
             : $"{header}\n\n⚠️ 它在等你确认：\n\n{started.Screen}\n\n回复 /yes {target} 同意，/no {target} 拒绝";
     }
 
+    /// <summary><c>/yes</c>、<c>/no</c>：回应确认框，成功后不再把它记为在等确认。</summary>
+    /// <param name="command">解析好的指令；没写目标时优先用在等确认的 agent。</param>
+    /// <param name="cancellationToken">取消等待。</param>
+    /// <returns>节点的说明；找不到目标或节点返回失败时是原因。</returns>
     private async Task<string> RespondAsync(ChatRespond command, CancellationToken cancellationToken)
     {
         var (resolved, error) = await ResolveOrRecentAsync(command.Target, cancellationToken, preferBlocked: true).ConfigureAwait(false);
@@ -545,6 +647,10 @@ public sealed class ChatDispatcher(
         return ReplyFormatter.Failure(outcome);
     }
 
+    /// <summary><c>/keys 目标 按键…</c>：给 agent 发送按键。</summary>
+    /// <param name="command">解析好的指令（按键已通过白名单检查）。</param>
+    /// <param name="cancellationToken">取消等待。</param>
+    /// <returns>节点的说明；找不到目标或节点返回失败时是原因。</returns>
     private async Task<string> KeysAsync(ChatKeys command, CancellationToken cancellationToken)
     {
         var (resolved, error) = await ResolveAsync(command.Target, cancellationToken).ConfigureAwait(false);
@@ -558,6 +664,10 @@ public sealed class ChatDispatcher(
         return outcome is { Ok: true, Data: AckData ack } ? $"👌 {resolved.Label}：{ack.Message}" : ReplyFormatter.Failure(outcome);
     }
 
+    /// <summary><c>/name 目标 新名字</c>：改名成功后用新名字记为最近打过交道的 agent。</summary>
+    /// <param name="command">解析好的指令。</param>
+    /// <param name="cancellationToken">取消等待。</param>
+    /// <returns>节点的说明；找不到目标或节点返回失败时是原因。</returns>
     private async Task<string> RenameAsync(ChatRename command, CancellationToken cancellationToken)
     {
         var (resolved, error) = await ResolveAsync(command.Target, cancellationToken).ConfigureAwait(false);
@@ -579,6 +689,9 @@ public sealed class ChatDispatcher(
     }
 
     /// <summary><c>/diff</c>：agent 工作目录里的 git 改动。</summary>
+    /// <param name="command">解析好的指令；没写目标时用最近打过交道的 agent，没写文件时看改动概要。</param>
+    /// <param name="cancellationToken">取消等待。</param>
+    /// <returns>改动内容；找不到目标或节点返回失败时是原因。</returns>
     private async Task<string> DiffAsync(ChatDiff command, CancellationToken cancellationToken)
     {
         var (resolved, error) = await ResolveOrRecentAsync(command.Target, cancellationToken).ConfigureAwait(false);
@@ -599,6 +712,9 @@ public sealed class ChatDispatcher(
     }
 
     /// <summary><c>/stop</c>：打断 agent，清空它排队的指令。</summary>
+    /// <param name="command">解析好的指令；没写目标时用最近打过交道的 agent。</param>
+    /// <param name="cancellationToken">取消等待。</param>
+    /// <returns>节点的说明；找不到目标或节点返回失败时是原因。</returns>
     private async Task<string> StopAsync(ChatStop command, CancellationToken cancellationToken)
     {
         var (resolved, error) = await ResolveOrRecentAsync(command.Target, cancellationToken).ConfigureAwait(false);
@@ -615,6 +731,12 @@ public sealed class ChatDispatcher(
     /// <summary>
     /// <c>/close</c>：第一次只给出要关闭的是哪个 agent，并记下来；2 分钟内带"确认"再发一次、并且还是同一个 pane，才真正关闭。
     /// </summary>
+    /// <param name="command">解析好的指令。</param>
+    /// <param name="cancellationToken">取消等待。</param>
+    /// <returns>
+    /// 确认提示（确认过期或对不上时也重新给出提示）；关闭成功时是节点的说明，并从对话上下文和 <c>/ls</c> 列表里去掉它；
+    /// 找不到目标或节点返回失败时是原因。
+    /// </returns>
     private async Task<string> CloseAsync(ChatClose command, CancellationToken cancellationToken)
     {
         var (resolved, error) = await ResolveAsync(command.Target, cancellationToken).ConfigureAwait(false);
@@ -658,6 +780,8 @@ public sealed class ChatDispatcher(
     }
 
     /// <summary><c>/watch</c>：每台在线设备在盯着哪些 agent。</summary>
+    /// <param name="cancellationToken">取消查询。</param>
+    /// <returns>每台在线设备一行，附上用法说明；没有在线设备时是提示。</returns>
     private async Task<string> WatchListAsync(CancellationToken cancellationToken)
     {
         var online = store.Devices().Where(d => hub.IsOnline(d.Id)).ToList();
@@ -692,6 +816,10 @@ public sealed class ChatDispatcher(
             + "\n\n盯着的 agent 在电脑上做完或卡在确认框时也会通知你。/watch 目标 开始盯，/watch all 盯全部，/unwatch 停止";
     }
 
+    /// <summary><c>/watch 目标</c>、<c>/unwatch 目标</c>：开始或停止盯一个 agent。</summary>
+    /// <param name="command">解析好的指令。</param>
+    /// <param name="cancellationToken">取消等待。</param>
+    /// <returns>节点的说明；找不到目标或节点返回失败时是原因。</returns>
     private async Task<string> WatchAsync(ChatWatch command, CancellationToken cancellationToken)
     {
         var (resolved, error) = await ResolveAsync(command.Target, cancellationToken).ConfigureAwait(false);
@@ -706,6 +834,9 @@ public sealed class ChatDispatcher(
     }
 
     /// <summary><c>/watch all [设备]</c>：没写设备时对所有在线设备生效。</summary>
+    /// <param name="command">解析好的指令。</param>
+    /// <param name="cancellationToken">取消等待。</param>
+    /// <returns>每台设备一行结果；指定的设备不可用或没有在线设备时是原因。</returns>
     private async Task<string> WatchAllAsync(ChatWatchAll command, CancellationToken cancellationToken)
     {
         List<DeviceRecord> devices;
@@ -737,6 +868,8 @@ public sealed class ChatDispatcher(
     }
 
     /// <summary><c>/history</c>：今天的统计和最近几条任务。</summary>
+    /// <param name="count">显示最近几条。</param>
+    /// <returns>今天（按主人的时区）做完、出错的个数和总耗时，以及最近的任务（新的在前）；没有记录时是提示。</returns>
     private string History(int count)
     {
         var entries = history.Snapshot();
@@ -778,6 +911,8 @@ public sealed class ChatDispatcher(
         return builder.ToString();
     }
 
+    /// <summary><c>/at</c>：按执行时间列出定时任务，时间按主人的时区显示。</summary>
+    /// <returns>定时任务列表；没有时是新建的用法。</returns>
     private string ScheduledJobs()
     {
         var jobs = store.Read(s => s.ScheduledJobs.OrderBy(j => j.DueAt).ToList());
@@ -800,6 +935,9 @@ public sealed class ChatDispatcher(
     /// <c>/at</c>：算出执行时间（按主人的时区），存进状态文件，由 <see cref="Scheduler"/> 到点执行。
     /// <c>@序号</c> 在这里就换成 <c>@设备/名字</c>：到点时的 <c>/ls</c> 序号可能已经变了。
     /// </summary>
+    /// <param name="command">解析好的指令。</param>
+    /// <param name="cancellationToken">取消等待（解析序号时要问节点）。</param>
+    /// <returns>编号、执行时间和取消方法；已经有 <see cref="MaxScheduledJobs"/> 个或序号解析不了时是原因。</returns>
     private async Task<string> ScheduleAsync(ChatAt command, CancellationToken cancellationToken)
     {
         if (store.Read(s => s.ScheduledJobs.Count) >= MaxScheduledJobs)
@@ -830,6 +968,9 @@ public sealed class ChatDispatcher(
     }
 
     /// <summary>执行时间（UTC）：相对时长直接加；时刻按主人的时区算，今天已经过了（或者写了"明天"）就是明天。</summary>
+    /// <param name="when">解析好的时间。</param>
+    /// <returns>执行时间（UTC）；夏令时切换时不存在的时刻往后挪到存在的时刻。</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="when"/> 为 null。</exception>
     internal DateTimeOffset DueTime(ScheduleTime when)
     {
         ArgumentNullException.ThrowIfNull(when);
@@ -856,6 +997,9 @@ public sealed class ChatDispatcher(
         return new DateTimeOffset(candidate, clock.Zone.GetUtcOffset(candidate)).ToUniversalTime();
     }
 
+    /// <summary><c>/at del 编号</c>：取消定时任务。</summary>
+    /// <param name="id">任务编号。</param>
+    /// <returns>取消结果；没有这个编号时是提示。</returns>
     private string CancelJob(int id)
     {
         var removed = false;
@@ -867,6 +1011,9 @@ public sealed class ChatDispatcher(
     /// <c>/wake</c>：让同一局域网里的其他在线设备广播唤醒包。按上线时记下的网段挑同一网段的设备；
     /// 一台都对不上时让所有在线设备都试一次（网段判断不一定准，多发几个包没有坏处）。
     /// </summary>
+    /// <param name="name">要唤醒的设备名或设备 ID。</param>
+    /// <param name="cancellationToken">取消等待。</param>
+    /// <returns>哪些设备发出了唤醒包，以及唤醒需要的条件；设备不存在、已经在线、不知道网卡、没有其他在线设备或都发送失败时是原因。</returns>
     private async Task<string> WakeAsync(string name, CancellationToken cancellationToken)
     {
         if (store.FindDevice(name) is not { } target)
@@ -908,6 +1055,9 @@ public sealed class ChatDispatcher(
     }
 
     /// <summary>两台设备有没有在同一个 IPv4 网段的网卡（按目标网卡的前缀长度比较）。</summary>
+    /// <param name="relay">帮忙发唤醒包的设备的网卡；旧版节点没报告时为 null。</param>
+    /// <param name="target">要唤醒的设备的网卡。</param>
+    /// <returns>有一对网卡在同一网段时为 <c>true</c>；没有地址、不是 IPv4 或前缀长度为 0 的网卡不参与比较。</returns>
     internal static bool SharesSubnet(IReadOnlyList<NetworkInterfaceInfo>? relay, IReadOnlyList<NetworkInterfaceInfo> target)
     {
         if (relay is null)
@@ -935,12 +1085,17 @@ public sealed class ChatDispatcher(
             IPAddress.TryParse(text, out address!) && address.AddressFamily == AddressFamily.InterNetwork;
     }
 
+    /// <summary><c>/drop</c>：丢掉暂存着、还没发出去的图片。</summary>
+    /// <returns>丢掉了几张；没有暂存的图片时是提示。</returns>
     private string DropImages()
     {
         var dropped = media.ClearPending();
         return dropped > 0 ? $"🗑 丢掉了 {dropped} 张暂存的图片" : "没有暂存的图片";
     }
 
+    /// <summary><c>/pair [设备名]</c>：生成配对码，给出在电脑上运行的完整配对命令（开了 TLS 时带上证书指纹）。</summary>
+    /// <param name="deviceName">预先指定的设备名；为 null 时由节点决定。</param>
+    /// <returns>配对码、有效期和配对命令；没配置 <see cref="ServerOptions.PublicUrl"/> 时提醒把服务器地址换成实际地址。</returns>
     private string Pair(string? deviceName)
     {
         var code = pairing.Create(deviceName);
@@ -957,6 +1112,9 @@ public sealed class ChatDispatcher(
             """;
     }
 
+    /// <summary><c>/unpair 设备</c>：删除设备、断开连接，并从 <c>/ls</c> 列表和对话上下文里去掉它的 agent。</summary>
+    /// <param name="name">设备名或设备 ID。</param>
+    /// <returns>撤销结果；写盘失败时说明重启后会恢复；设备不存在时是提示。</returns>
     private async Task<string> UnpairAsync(string name)
     {
         if (store.FindDevice(name) is not { } device)
@@ -987,6 +1145,7 @@ public sealed class ChatDispatcher(
     }
 
     /// <summary>默认设备：已选的设备；没选时如果只有一台在线就用它。</summary>
+    /// <returns>可用的默认设备；已选的设备离线、没有在线设备、没选且有多台在线时设备为 null，并给出原因。</returns>
     private (DeviceRecord? Device, string? Error) DefaultDevice()
     {
         var selectedId = store.Read(s => s.SelectedDeviceId);
@@ -1004,6 +1163,9 @@ public sealed class ChatDispatcher(
         };
     }
 
+    /// <summary>按名字找一台在线的设备。</summary>
+    /// <param name="name">设备名或设备 ID。</param>
+    /// <returns>找到并且在线时返回设备；设备不存在或离线时设备为 null，并给出原因。</returns>
     private (DeviceRecord? Device, string? Error) OnlineDevice(string name)
     {
         if (store.FindDevice(name) is not { } device)
@@ -1018,6 +1180,10 @@ public sealed class ChatDispatcher(
     /// 没写目标时用默认目标：<paramref name="preferBlocked"/> 为 true（<c>/yes</c>、<c>/no</c>）时先看在等确认的 agent，
     /// 只有一个就用它、有多个就让主人指定；否则用最近打过交道的 agent。
     /// </summary>
+    /// <param name="target">主人写的目标；为 null 时用默认目标。</param>
+    /// <param name="cancellationToken">取消查询。</param>
+    /// <param name="preferBlocked">没写目标时是否先找在等确认的 agent。</param>
+    /// <returns>找到的 agent；找不到时为 null，并给出原因。</returns>
     private async Task<(Resolved? Resolved, string? Error)> ResolveOrRecentAsync(TargetRef? target, CancellationToken cancellationToken, bool preferBlocked = false)
     {
         if (target is not null)
@@ -1049,6 +1215,8 @@ public sealed class ChatDispatcher(
     /// 发过"在等你确认"的 agent 里，现在确实还在等的（按 pane 对上，用它现在的名字）。已经不等了的（在电脑上处理掉了、
     /// 用 /keys 处理了、关掉了）顺手从记录里划掉；所在设备离线或查询失败的不算候选，但先不划掉。
     /// </summary>
+    /// <param name="cancellationToken">取消查询。</param>
+    /// <returns>现在确实还在等确认的 agent，最近发通知的在前；没有时为空列表。</returns>
     private async Task<IReadOnlyList<Resolved>> StillBlockedAsync(CancellationToken cancellationToken)
     {
         var remembered = conversation.Blocked();
@@ -1088,6 +1256,9 @@ public sealed class ChatDispatcher(
     /// 没指定设备时在所有在线设备里找，多处匹配时优先默认设备，仍有歧义就让用户指定。
     /// 找到的 agent 记为"最近打过交道的"。
     /// </summary>
+    /// <param name="target">主人写的目标。</param>
+    /// <param name="cancellationToken">取消查询。</param>
+    /// <returns>找到的 agent；找不到、设备离线或有歧义时为 null，并给出原因。</returns>
     private async Task<(Resolved? Resolved, string? Error)> ResolveAsync(TargetRef target, CancellationToken cancellationToken)
     {
         var (resolved, error) = await FindAsync(target, cancellationToken).ConfigureAwait(false);
@@ -1099,6 +1270,13 @@ public sealed class ChatDispatcher(
         return (resolved, error);
     }
 
+    /// <summary>按 <see cref="ResolveAsync"/> 的规则找 agent，但不更新对话上下文。</summary>
+    /// <param name="target">主人写的目标。</param>
+    /// <param name="cancellationToken">取消查询。</param>
+    /// <returns>
+    /// 找到的 agent；序号不存在或不在指定的设备上、设备离线、找不到（顺带列出查询失败的设备）、
+    /// 多处匹配且默认设备上不是正好一个时为 null，并给出原因。
+    /// </returns>
     private async Task<(Resolved? Resolved, string? Error)> FindAsync(TargetRef target, CancellationToken cancellationToken)
     {
         if (target.IsIndex)
@@ -1186,6 +1364,9 @@ public sealed class ChatDispatcher(
             string.Join("、", matches.Select(m => $"{m.Device.Name}/{m.Agent.Name ?? m.Agent.PaneId}")));
     }
 
+    /// <summary>设备不存在时的说明，顺便列出现有的设备。</summary>
+    /// <param name="name">主人写的设备名。</param>
+    /// <returns>说明文字（不带前面的图标）。</returns>
     private string UnknownDevice(string name)
     {
         var names = store.Devices().Select(d => d.Name).ToList();

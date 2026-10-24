@@ -12,6 +12,12 @@ namespace ChatPilot.Server.Chat;
 /// <item>服务器停机错过的任务：晚了不到 <see cref="MissedGrace"/> 照常执行，更晚的不执行，只通知主人。</item>
 /// </list>
 /// </remarks>
+/// <param name="store">状态文件，定时任务存在这里，服务器重启后还在。</param>
+/// <param name="dispatcher">执行到点任务的入口，和主人发消息走同一套逻辑。</param>
+/// <param name="notifier">把执行结果或“已错过”的说明推送给主人。</param>
+/// <param name="clock">按主人的时区显示原定时间。</param>
+/// <param name="time">时间来源，测试里可以换成假时钟。</param>
+/// <param name="logger">日志。</param>
 public sealed class Scheduler(
     StateStore store,
     ChatDispatcher dispatcher,
@@ -23,6 +29,7 @@ public sealed class Scheduler(
     /// <summary>错过执行时间多久以内还照常执行。</summary>
     internal static readonly TimeSpan MissedGrace = TimeSpan.FromMinutes(10);
 
+    /// <summary>多久检查一次有没有到点的任务，也就是任务到点后最多晚这么久执行。</summary>
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(5);
 
     /// <inheritdoc />
@@ -49,6 +56,8 @@ public sealed class Scheduler(
     }
 
     /// <summary>执行所有到点的任务（按时间先后）。</summary>
+    /// <param name="cancellationToken">服务器停止时取消。</param>
+    /// <returns>这一批到点的任务都处理完后完成的任务。</returns>
     internal async Task RunDueAsync(CancellationToken cancellationToken)
     {
         var now = time.GetUtcNow();

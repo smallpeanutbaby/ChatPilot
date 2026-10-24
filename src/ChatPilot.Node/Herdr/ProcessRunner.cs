@@ -11,6 +11,8 @@ namespace ChatPilot.Node.Herdr;
 public sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
 
 /// <summary>进程启动失败（通常是找不到可执行文件）。</summary>
+/// <param name="message">给用户看的说明，带上了程序名。</param>
+/// <param name="inner">启动时的原始异常。</param>
 public sealed class ProcessStartException(string message, Exception inner) : Exception(message, inner);
 
 /// <summary>启动外部程序。参数一律按数组传，不经过 shell。</summary>
@@ -21,6 +23,7 @@ public interface IProcessRunner
     /// <param name="arguments">参数，每一项原样作为一个参数传给程序。</param>
     /// <param name="timeout">超时时间，到时结束整个进程树。</param>
     /// <param name="cancellationToken">取消时同样结束进程。</param>
+    /// <returns>退出码和全部输出（不论退出码是多少）。</returns>
     /// <exception cref="ProcessStartException">程序启动失败。</exception>
     /// <exception cref="TimeoutException">超时，进程已被结束。</exception>
     Task<ProcessResult> RunAsync(string fileName, IReadOnlyList<string> arguments, TimeSpan timeout, CancellationToken cancellationToken);
@@ -92,6 +95,8 @@ public sealed class ProcessRunner : IProcessRunner
         }
     }
 
+    /// <summary>结束整个进程树；进程已经退出时忽略。</summary>
+    /// <param name="process">要结束的进程。</param>
     private static void Kill(Process process)
     {
         try

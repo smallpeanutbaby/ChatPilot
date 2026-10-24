@@ -26,13 +26,20 @@ public sealed class TrackedTasks
     /// <summary>最多记这么多条（和同时跟踪的上限相当，留些余量）。</summary>
     private const int MaxTasks = 64;
 
+    /// <summary>读写记录文件用的 JSON 设置（Web 默认值，属性名用小驼峰）。</summary>
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
+    /// <summary>记录文件的路径；为 null 时只记在内存里。</summary>
     private readonly string? _path;
     private readonly ILogger _logger;
+
+    /// <summary>保护 <see cref="_tasks"/> 和写盘：多个任务的后台跟踪会同时增删记录。</summary>
     private readonly Lock _lock = new();
+
+    /// <summary>当前跟踪的任务，按记下的先后排列，超出上限时先丢最早的。</summary>
     private readonly List<TrackedTask> _tasks;
 
+    /// <summary>创建任务记录，并读出上次保存的任务。</summary>
     /// <param name="path">保存的文件；为 null 时只记在内存里（测试用）。</param>
     /// <param name="logger">日志。</param>
     public TrackedTasks(string? path, ILogger logger)
@@ -43,9 +50,12 @@ public sealed class TrackedTasks
     }
 
     /// <summary>节点配置文件旁边的任务记录文件，例如 <c>~/.chatpilot/node.tasks.json</c>。</summary>
+    /// <param name="configPath">节点配置文件的路径。</param>
+    /// <returns>任务记录文件的完整路径。</returns>
     public static string PathFor(string configPath) => Path.ChangeExtension(Path.GetFullPath(configPath), ".tasks.json");
 
     /// <summary>所有任务（副本）。</summary>
+    /// <returns>当前所有任务的副本，之后的增删不影响它。</returns>
     public IReadOnlyList<TrackedTask> Snapshot()
     {
         lock (_lock)
@@ -55,6 +65,8 @@ public sealed class TrackedTasks
     }
 
     /// <summary>这个 pane 当前的任务。</summary>
+    /// <param name="paneId">agent 所在 pane。</param>
+    /// <returns>这个 pane 的任务；没有在跟踪的为 null。</returns>
     public TrackedTask? Find(string paneId)
     {
         lock (_lock)
@@ -64,6 +76,7 @@ public sealed class TrackedTasks
     }
 
     /// <summary>记下一个任务，替换这个 pane 之前的任务。</summary>
+    /// <param name="task">要跟踪的任务。</param>
     public void Track(TrackedTask task)
     {
         ArgumentNullException.ThrowIfNull(task);
@@ -81,6 +94,7 @@ public sealed class TrackedTasks
     }
 
     /// <summary>删掉一个任务（已经被新任务替换的话什么也不做）。</summary>
+    /// <param name="id">要删的任务 ID。</param>
     public void Remove(Guid id)
     {
         lock (_lock)
@@ -110,6 +124,10 @@ public sealed class TrackedTasks
         }
     }
 
+    /// <summary>读出上次保存的任务；文件坏了只记日志，当作没有任务。</summary>
+    /// <param name="path">保存的文件；为 null 时不读。</param>
+    /// <param name="logger">日志。</param>
+    /// <returns>读到的任务（去掉没有 pane ID 的，最多保留最后 <see cref="MaxTasks"/> 条）；没有文件或读取失败时为空列表。</returns>
     private static List<TrackedTask> Load(string? path, ILogger logger)
     {
         if (path is null || !File.Exists(path))

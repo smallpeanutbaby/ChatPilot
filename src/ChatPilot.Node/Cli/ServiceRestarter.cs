@@ -12,11 +12,18 @@ namespace ChatPilot.Node.Cli;
 /// </remarks>
 public static class ServiceRestarter
 {
+    /// <summary>README 里 Windows 计划任务的名字。</summary>
     private const string WindowsTask = "ChatPilotNode";
+
+    /// <summary>README 里 macOS launchd 服务的标签。</summary>
     private const string LaunchdLabel = "com.chatpilot.node";
+
+    /// <summary>README 里 Linux systemd 用户服务的名字。</summary>
     private const string SystemdUnit = "chatpilot-node";
 
     /// <summary>重启运行着这个程序的服务。</summary>
+    /// <param name="executablePath">刚替换掉的程序；服务的启动命令里必须出现它的完整路径才会重启。</param>
+    /// <param name="cancellationToken">取消查询和重启。</param>
     /// <returns>重启了的服务的说明；没找到（或者不是运行这个程序的）返回 null。</returns>
     public static async Task<string?> TryRestartAsync(string executablePath, CancellationToken cancellationToken)
     {
@@ -69,18 +76,27 @@ public static class ServiceRestarter
     }
 
     /// <summary>没找到服务时，告诉用户怎么自己重启。</summary>
+    /// <returns>按当前操作系统给出的重启命令说明。</returns>
     public static string ManualHint() =>
         OperatingSystem.IsWindows() ? $"请重启节点：Stop-ScheduledTask -TaskName {WindowsTask}; Start-ScheduledTask -TaskName {WindowsTask}（或者重新运行 chatpilot-node run）"
         : OperatingSystem.IsMacOS() ? $"请重启节点：launchctl kickstart -k gui/$(id -u)/{LaunchdLabel}（或者重新运行 chatpilot-node run）"
         : $"请重启节点：systemctl --user restart {SystemdUnit}（或者重新运行 chatpilot-node run）";
 
     /// <summary>服务的启动命令里是不是这个程序（命令输出里出现它的完整路径）。</summary>
+    /// <param name="output">查询服务配置的命令输出；命令没运行成功时为 null。</param>
+    /// <param name="executablePath">这个程序的路径。</param>
+    /// <param name="ignoreCase">是否忽略大小写（Windows 路径不区分大小写）。</param>
+    /// <returns>命令退出码为 0 且输出里有这个程序的完整路径时为 true。</returns>
     internal static bool RunsExecutable(ProcessOutput? output, string executablePath, bool ignoreCase) =>
         output is { ExitCode: 0 } && output.Output.Contains(
             Path.GetFullPath(executablePath),
             ignoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
     /// <summary>运行一个系统命令；命令不存在或 30 秒内没结束返回 null。</summary>
+    /// <param name="fileName">命令名或路径。</param>
+    /// <param name="arguments">参数，逐个传入，不经过 shell。</param>
+    /// <param name="cancellationToken">取消运行。</param>
+    /// <returns>退出码和标准输出；启动不了或超时（会结束进程）时为 null。</returns>
     private static async Task<ProcessOutput?> RunAsync(string fileName, IEnumerable<string> arguments, CancellationToken cancellationToken)
     {
         var start = new ProcessStartInfo(fileName)

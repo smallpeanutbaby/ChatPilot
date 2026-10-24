@@ -13,6 +13,7 @@ namespace ChatPilot.Node.Cli;
 /// <summary>节点命令行：pair（配对）、run（运行）、doctor（自检）、update（升级）、version（版本）。</summary>
 public static class NodeCli
 {
+    /// <summary>帮助文字：没给命令、<c>--help</c> 或命令不认识时打印。</summary>
     private const string Usage = """
         ChatPilot 节点：让手机通过服务器指挥这台电脑上的 herdr agent。
 
@@ -37,6 +38,8 @@ public static class NodeCli
         """;
 
     /// <summary>运行节点命令行，返回进程退出码：0 成功，1 出错，2 设备令牌被拒绝。</summary>
+    /// <param name="args">命令行参数，第一个是命令名。</param>
+    /// <returns>进程退出码；配置、配对、升级等可预期的错误打印说明后返回 1，不抛出。</returns>
     public static async Task<int> RunAsync(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
@@ -67,6 +70,14 @@ public static class NodeCli
         }
     }
 
+    /// <summary>
+    /// <c>pair</c>：先用占位的设备信息把配置校验一遍（配对码只能用一次，不能浪费在配置错误上），
+    /// 再用配对码换设备令牌，成功后保存配置。
+    /// </summary>
+    /// <param name="cli">解析好的命令行。</param>
+    /// <param name="configPath">配置文件路径；已存在时要加 <c>--force</c> 才覆盖。</param>
+    /// <returns>0 配对成功；1 参数或配置有问题。</returns>
+    /// <exception cref="PairingException">配对码无效、请求太频繁或连不上服务器。</exception>
     private static async Task<int> PairAsync(CommandLine cli, string configPath)
     {
         cli.RejectUnknown("server", "code", "fingerprint", "name", "root", "kind", "herdr", "session", "force", "config");
@@ -157,6 +168,15 @@ public static class NodeCli
         return 0;
     }
 
+    /// <summary>
+    /// <c>run</c>：组装 herdr 客户端、任务跟踪、盯着 agent 的 watcher、附件下载和指令执行，然后连上服务器一直运行，
+    /// 直到收到 SIGINT / SIGTERM、被另一个实例替换或设备令牌被拒绝。启动时顺便清掉升级留下的旧程序。
+    /// </summary>
+    /// <param name="cli">解析好的命令行。</param>
+    /// <param name="configPath">配置文件路径；任务记录、排队指令和附件都存在它旁边。</param>
+    /// <returns>0 正常退出（包括被替换）；1 参数有问题；2 设备令牌被拒绝。</returns>
+    /// <exception cref="FileNotFoundException">还没配对。</exception>
+    /// <exception cref="InvalidDataException">配置有问题。</exception>
     private static async Task<int> RunNodeAsync(CommandLine cli, string configPath)
     {
         cli.RejectUnknown("config");
@@ -220,6 +240,12 @@ public static class NodeCli
         }
     }
 
+    /// <summary><c>doctor</c>：逐项检查 herdr、允许的目录、各启动方式、git 和服务器健康检查，打印结果。</summary>
+    /// <param name="cli">解析好的命令行。</param>
+    /// <param name="configPath">配置文件路径。</param>
+    /// <returns>0 herdr 和服务器都正常（目录、启动方式、git 只给警告，不影响结果）；1 参数有问题或任一必需项不正常。</returns>
+    /// <exception cref="FileNotFoundException">还没配对。</exception>
+    /// <exception cref="InvalidDataException">配置有问题。</exception>
     private static async Task<int> DoctorAsync(CommandLine cli, string configPath)
     {
         cli.RejectUnknown("config");
@@ -290,6 +316,8 @@ public static class NodeCli
         return ok ? 0 : 1;
     }
 
+    /// <summary><c>version</c>：打印节点版本和运行时标识（RID）。</summary>
+    /// <returns>总是 0。</returns>
     private static int Version()
     {
         Console.WriteLine($"chatpilot-node {NodeUpdater.CurrentVersion()}（{RuntimeInformation.RuntimeIdentifier}）");
@@ -297,6 +325,9 @@ public static class NodeCli
     }
 
     /// <summary>升级到 GitHub 上的最新版本。只有发布版（单文件程序）能升级：用源码运行的，替换掉的只是 dotnet 的启动器。</summary>
+    /// <param name="cli">解析好的命令行，可带 <c>--check</c>、<c>--no-restart</c>。</param>
+    /// <returns>0 已是最新、有新版本（<c>--check</c>）或已升级；1 不能升级或没有权限替换程序。</returns>
+    /// <exception cref="UpdateException">查不到版本、下载失败或校验值不符。</exception>
     private static async Task<int> UpdateAsync(CommandLine cli)
     {
         cli.RejectUnknown("check", "no-restart", "config");
@@ -358,6 +389,8 @@ public static class NodeCli
         return 0;
     }
 
+    /// <summary>节点运行时的日志：Information 级别，单行、带时间戳输出到控制台（开机自启时由服务管理器收集）。</summary>
+    /// <returns>调用方负责释放的日志工厂。</returns>
     private static ILoggerFactory CreateLoggerFactory() =>
         LoggerFactory.Create(builder => builder
             .SetMinimumLevel(LogLevel.Information)
@@ -367,15 +400,22 @@ public static class NodeCli
                 options.TimestampFormat = "yyyy-MM-dd HH:mm:ss ";
             }));
 
+    /// <summary>把错误打印到标准错误。</summary>
+    /// <param name="message">给用户看的说明。</param>
+    /// <returns>总是 1，方便直接 <c>return Fail(…)</c>。</returns>
     private static int Fail(string message)
     {
         Console.Error.WriteLine("❌ " + message);
         return 1;
     }
 
+    /// <summary>把操作系统描述截到 100 个字符以内再交给服务器。</summary>
+    /// <param name="text">操作系统描述。</param>
+    /// <returns>截短后的描述。</returns>
     private static string ClipPlatform(string text) => Shared.Text.TextChunker.Truncate(text, 100);
 
     /// <summary>电脑名里只保留设备名允许的字符。</summary>
+    /// <returns>不允许的字符换成 <c>-</c>、截到 32 个字符的电脑名；仍不合格时为 <c>device</c>。</returns>
     internal static string DefaultDeviceName()
     {
         var builder = new StringBuilder();
@@ -390,6 +430,8 @@ public static class NodeCli
     }
 
     /// <summary>在 PATH 里找可执行文件。Windows 上只认 .exe：.cmd / .bat 会经过 cmd.exe，参数不安全。</summary>
+    /// <param name="command">命令名，不带扩展名。</param>
+    /// <returns>第一个找到的完整路径；找不到时为 null。</returns>
     internal static string? FindInPath(string command)
     {
         var names = OperatingSystem.IsWindows() ? new[] { command + ".exe" } : [command];

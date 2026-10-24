@@ -12,16 +12,22 @@ public interface IChatChannel
     bool IsReady { get; }
 
     /// <summary>给主人发一条消息（超长时由通道自己分段）。</summary>
+    /// <param name="text">消息内容。</param>
+    /// <param name="cancellationToken">取消发送。</param>
+    /// <returns>发完（或交给队列）时完成的任务。</returns>
     Task SendToOwnerAsync(string text, CancellationToken cancellationToken);
 }
 
 /// <summary>已启用的聊天通道。通道启动时自己登记，避免和指令分发器形成循环依赖。</summary>
 public sealed class ChatChannelRegistry
 {
+    /// <summary>保护 <c>_channels</c>：通道在启动时登记，通知随时在读。</summary>
     private readonly Lock _lock = new();
+    /// <summary>已登记的通道，按登记顺序。</summary>
     private readonly List<IChatChannel> _channels = [];
 
     /// <summary>登记一个通道；重复登记会被忽略。</summary>
+    /// <param name="channel">要登记的通道。</param>
     public void Register(IChatChannel channel)
     {
         lock (_lock)
@@ -34,6 +40,7 @@ public sealed class ChatChannelRegistry
     }
 
     /// <summary>当前已登记的通道（副本）。</summary>
+    /// <returns>按登记顺序排列的通道；还没有通道登记时为空列表。</returns>
     public IReadOnlyList<IChatChannel> Snapshot()
     {
         lock (_lock)
@@ -49,14 +56,18 @@ public sealed class ChatChannelRegistry
 /// </summary>
 public sealed class Notifier : IDisposable
 {
+    /// <summary>最多排队多少条还没发出的通知；通道一直发不出去时，超出的直接丢弃，不会无限占内存。</summary>
     private const int QueueCapacity = 100;
 
     private readonly ChatChannelRegistry _registry;
     private readonly ILogger<Notifier> _logger;
+    /// <summary>等待发送的通知。只有一个后台任务在读，保证通知按产生的顺序到达。</summary>
     private readonly Channel<string> _queue = Channel.CreateBounded<string>(
         new BoundedChannelOptions(QueueCapacity) { FullMode = BoundedChannelFullMode.Wait, SingleReader = true });
 
     /// <summary>创建通知器，并启动按顺序发送队列的后台任务。</summary>
+    /// <param name="registry">已登记的聊天通道。</param>
+    /// <param name="logger">日志。</param>
     public Notifier(ChatChannelRegistry registry, ILogger<Notifier> logger)
     {
         _registry = registry;
@@ -65,6 +76,7 @@ public sealed class Notifier : IDisposable
     }
 
     /// <summary>排队发送一条通知；队列满时丢弃并记日志。</summary>
+    /// <param name="text">通知内容。</param>
     public void Enqueue(string text)
     {
         if (!_queue.Writer.TryWrite(text))
@@ -77,6 +89,9 @@ public sealed class Notifier : IDisposable
     public void Dispose() => _queue.Writer.TryComplete();
 
     /// <summary>立即发到所有可用通道。单个通道失败只记日志，不影响其他通道。</summary>
+    /// <param name="text">通知内容。</param>
+    /// <param name="cancellationToken">取消发送；取消不会被吞掉，会抛给调用方。</param>
+    /// <returns>所有通道都尝试发过之后完成的任务；没有可用通道时只记日志。</returns>
     public async Task BroadcastAsync(string text, CancellationToken cancellationToken)
     {
         var channels = _registry.Snapshot().Where(c => c.IsReady).ToList();
@@ -99,6 +114,8 @@ public sealed class Notifier : IDisposable
         }
     }
 
+    /// <summary>后台任务：按顺序取出队列里的通知逐条广播，直到 <see cref="Dispose"/> 后队列发完。</summary>
+    /// <returns>队列关闭并发完后完成的任务。</returns>
     private async Task DrainAsync()
     {
         await foreach (var text in _queue.Reader.ReadAllAsync().ConfigureAwait(false))

@@ -19,15 +19,21 @@ namespace ChatPilot.Node.Execution;
 public sealed partial class TranscriptLocator(NodeConfig config, ILogger logger, string home, Func<string, string?> environment)
 {
     /// <summary>用当前用户的主目录和进程环境变量。</summary>
+    /// <param name="config">节点配置（额外的 Claude 会话目录）。</param>
+    /// <param name="logger">日志。</param>
     public TranscriptLocator(NodeConfig config, ILogger logger)
         : this(config, logger, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), Environment.GetEnvironmentVariable)
     {
     }
 
     /// <summary>能找会话记录的 agent 类型。</summary>
+    /// <param name="kind">herdr 上报的 agent 类型。</param>
+    /// <returns>能读这种 agent 的会话记录为 true；类型未知（null）为 false。</returns>
     public static bool Supports(string? kind) => TranscriptReader.Supports(kind) || kind is "opencode" or "kilo";
 
     /// <summary>找会话记录；没有会话引用、格式不支持或找不到时返回 null。</summary>
+    /// <param name="agent">要找会话记录的 agent，用它的类型和会话引用。</param>
+    /// <returns>找到的会话记录；没有会话引用、格式不支持、找不到或读目录失败时为 null。</returns>
     public TranscriptSource? Find(HerdrAgent agent)
     {
         ArgumentNullException.ThrowIfNull(agent);
@@ -73,6 +79,8 @@ public sealed partial class TranscriptLocator(NodeConfig config, ILogger logger,
     }
 
     /// <summary>Claude：各个 projects 目录下的 <c>&lt;项目&gt;/&lt;id&gt;.jsonl</c>。</summary>
+    /// <param name="sessionId">已校验过格式的会话 ID。</param>
+    /// <returns>会话记录文件；找不到时为 null。</returns>
     private string? FindClaude(string sessionId)
     {
         foreach (var root in ClaudeProjectRoots())
@@ -98,6 +106,7 @@ public sealed partial class TranscriptLocator(NodeConfig config, ILogger logger,
     }
 
     /// <summary>可能存放 Claude 会话记录的目录：配置的、CLAUDE_CONFIG_DIR、~/.claude、reclaude 的各个账号。</summary>
+    /// <returns>实际存在的目录，按上面的顺序去重。</returns>
     private IEnumerable<string> ClaudeProjectRoots()
     {
         var roots = new List<string>(config.ClaudeProjectRoots.Select(PathPolicy.ExpandHome));
@@ -127,6 +136,8 @@ public sealed partial class TranscriptLocator(NodeConfig config, ILogger logger,
     /// Codex：<c>$CODEX_HOME</c>（默认 <c>~/.codex</c>）下 sessions 按日期分目录，
     /// 文件名是 <c>rollout-&lt;时间&gt;-&lt;id&gt;.jsonl</c>；归档的会话在 archived_sessions。
     /// </summary>
+    /// <param name="sessionId">已校验过格式的会话 ID。</param>
+    /// <returns>会话记录文件（有多个时取最近写过的）；找不到时为 null。</returns>
     private string? FindCodex(string sessionId)
     {
         var codexHome = environment("CODEX_HOME") is { Length: > 0 } custom ? custom : Path.Combine(home, ".codex");
@@ -154,6 +165,8 @@ public sealed partial class TranscriptLocator(NodeConfig config, ILogger logger,
     /// Kimi Code：<c>$KIMI_CODE_HOME</c>（默认 <c>~/.kimi-code</c>）下 <c>sessions/&lt;工作区&gt;/session_&lt;uuid&gt;/agents/main/wire.jsonl</c>。
     /// 会话 ID 本身带 <c>session_</c> 前缀；兼容只给了 uuid 的情况。
     /// </summary>
+    /// <param name="sessionId">已校验过格式的会话 ID。</param>
+    /// <returns>会话记录文件；找不到时为 null。</returns>
     private string? FindKimi(string sessionId)
     {
         var kimiHome = environment("KIMI_CODE_HOME") is { Length: > 0 } custom ? custom : Path.Combine(home, ".kimi-code");
@@ -181,6 +194,8 @@ public sealed partial class TranscriptLocator(NodeConfig config, ILogger logger,
     /// 归档的在 <c>chats/archive</c>。目录名由工作目录换算而来、切换目录后会变，所以逐个项目找（Qwen 自己也是这样找的）。
     /// settings 里自定义的 <c>advanced.runtimeOutputDir</c> 不支持，需要时用 QWEN_RUNTIME_DIR。
     /// </summary>
+    /// <param name="sessionId">已校验过格式的会话 ID。</param>
+    /// <returns>会话记录文件；找不到时为 null。</returns>
     private string? FindQwen(string sessionId)
     {
         foreach (var root in new[] { environment("QWEN_RUNTIME_DIR"), environment("QWEN_HOME"), Path.Combine(home, ".qwen") })
@@ -210,6 +225,8 @@ public sealed partial class TranscriptLocator(NodeConfig config, ILogger logger,
     /// Droid：<c>$FACTORY_HOME_OVERRIDE</c>（默认用户主目录）下 <c>.factory/sessions</c>，
     /// 按工作目录分子目录；和 Droid 自己一样依次找根目录、<c>btw</c> 和各个子目录。
     /// </summary>
+    /// <param name="sessionId">已校验过格式的会话 ID。</param>
+    /// <returns>会话记录文件；找不到时为 null。</returns>
     private string? FindDroid(string sessionId)
     {
         var factoryHome = environment("FACTORY_HOME_OVERRIDE") is { Length: > 0 } custom ? custom : home;
@@ -223,6 +240,8 @@ public sealed partial class TranscriptLocator(NodeConfig config, ILogger logger,
     /// Cursor Agent：<c>$CURSOR_DATA_DIR</c>（默认 <c>~/.cursor</c>）下 <c>projects/&lt;目录&gt;/agent-transcripts/&lt;id&gt;/&lt;id&gt;.jsonl</c>，
     /// 旧版本直接放在 agent-transcripts 下。目录名由工作目录换算、不同目录可能重名，所以逐个项目找。
     /// </summary>
+    /// <param name="sessionId">已校验过格式的会话 ID。</param>
+    /// <returns>会话记录文件；找不到时为 null。</returns>
     private string? FindCursor(string sessionId)
     {
         var cursorHome = environment("CURSOR_DATA_DIR") is { Length: > 0 } custom ? custom : Path.Combine(home, ".cursor");
@@ -234,6 +253,8 @@ public sealed partial class TranscriptLocator(NodeConfig config, ILogger logger,
     }
 
     /// <summary>GitHub Copilot CLI：<c>$COPILOT_HOME</c>（默认 <c>~/.copilot</c>）下 <c>session-state/&lt;id&gt;/events.jsonl</c>。</summary>
+    /// <param name="sessionId">已校验过格式的会话 ID。</param>
+    /// <returns>会话记录文件；找不到时为 null。</returns>
     private string? FindCopilot(string sessionId)
     {
         var copilotHome = environment("COPILOT_HOME") is { Length: > 0 } custom ? custom : Path.Combine(home, ".copilot");
@@ -241,14 +262,22 @@ public sealed partial class TranscriptLocator(NodeConfig config, ILogger logger,
     }
 
     /// <summary>Grok Build：<c>$GROK_HOME</c>（默认 <c>~/.grok</c>）下 <c>sessions/&lt;编码后的目录&gt;/&lt;id&gt;/updates.jsonl</c>。</summary>
+    /// <param name="sessionId">已校验过格式的会话 ID。</param>
+    /// <returns>会话记录文件；找不到时为 null。</returns>
     private string? FindGrok(string sessionId)
     {
         var grokHome = environment("GROK_HOME") is { Length: > 0 } custom ? custom : Path.Combine(home, ".grok");
         return FirstFile(Subdirectories(Path.Combine(grokHome, "sessions")).Select(d => Path.Combine(d, sessionId, "updates.jsonl")));
     }
 
+    /// <summary>按顺序找第一个存在的文件。</summary>
+    /// <param name="candidates">候选文件路径。</param>
+    /// <returns>第一个存在的文件；都不存在时为 null。</returns>
     private static string? FirstFile(IEnumerable<string> candidates) => candidates.FirstOrDefault(File.Exists);
 
+    /// <summary>目录下的子目录；目录不存在时不报错。</summary>
+    /// <param name="root">要列的目录。</param>
+    /// <returns>子目录；目录不存在时为空。</returns>
     private static IEnumerable<string> Subdirectories(string root) => Directory.Exists(root) ? Directory.EnumerateDirectories(root) : [];
 
     /// <summary>
@@ -256,6 +285,9 @@ public sealed partial class TranscriptLocator(NodeConfig config, ILogger logger,
     /// 库文件可以用 <c>OPENCODE_DB</c> / <c>KILO_DB</c> 指定，否则是 <c>&lt;应用&gt;.db</c>，或者按发布通道命名的 <c>&lt;应用&gt;-&lt;通道&gt;.db</c>
     /// （kilo 还会沿用旧的 <c>opencode-&lt;通道&gt;.db</c>）。逐个打开，找含有这个会话的库。
     /// </summary>
+    /// <param name="kind">agent 类型，<c>opencode</c> 或 <c>kilo</c>，也是数据目录名。</param>
+    /// <param name="sessionId">已校验过格式的会话 ID。</param>
+    /// <returns>含有这个会话的库文件；都没有时为 null。</returns>
     private string? FindOpenCodeDatabase(string kind, string sessionId)
     {
         var dataHome = environment("XDG_DATA_HOME") is { Length: > 0 } xdg ? xdg : Path.Combine(home, ".local", "share");
@@ -279,6 +311,7 @@ public sealed partial class TranscriptLocator(NodeConfig config, ILogger logger,
     }
 
     /// <summary>会话 ID 只允许字母、数字、下划线和短横线（Kimi 的 ID 形如 <c>session_&lt;uuid&gt;</c>）。</summary>
+    /// <returns>匹配 1 到 80 位合法会话 ID 的正则。</returns>
     [GeneratedRegex(@"^[A-Za-z0-9_-]{1,80}\z", RegexOptions.CultureInvariant)]
     private static partial Regex SessionIdRegex();
 }
@@ -290,6 +323,8 @@ public sealed partial class TranscriptLocator(NodeConfig config, ILogger logger,
 public sealed record TranscriptSource(string Kind, string Path, string? SessionId)
 {
     /// <summary>取最后一条回复；读不了或没有内容时返回 null。</summary>
+    /// <param name="maxChars">回复最长多少字，超长时保留结尾部分。</param>
+    /// <returns>最后一轮的回复；读不了、没有内容，或者 opencode / kilo 没有会话 ID 时为 null。</returns>
     public string? LastReply(int maxChars) =>
         Kind is "opencode" or "kilo"
             ? SessionId is null ? null : OpenCodeStore.LastReply(Path, SessionId, maxChars)

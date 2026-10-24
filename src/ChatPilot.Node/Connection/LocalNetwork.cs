@@ -17,6 +17,7 @@ public static class LocalNetwork
     private static readonly int[] WakePorts = [9, 7];
 
     /// <summary>已启用的有线 / 无线网卡：MAC 地址和 IPv4 网段，最多 <see cref="ProtocolInfo.MaxWakeAddresses"/> 块。读取失败时返回空列表。</summary>
+    /// <returns>跳过回环、隧道、PPP 和没有有效 MAC 的网卡；没有 IPv4 地址的网卡 <see cref="NetworkInterfaceInfo.Address"/> 为 null。</returns>
     public static IReadOnlyList<NetworkInterfaceInfo> Describe()
     {
         try
@@ -49,6 +50,8 @@ public static class LocalNetwork
     }
 
     /// <summary>6 字节、不全为 0 的物理地址格式化成 <c>AA:BB:CC:DD:EE:FF</c>；其他返回 null。</summary>
+    /// <param name="address">网卡的物理地址。</param>
+    /// <returns>大写、冒号分隔的 MAC 地址；长度不是 6 字节或全为 0 时为 null。</returns>
     internal static string? FormatMac(PhysicalAddress address)
     {
         var bytes = address.GetAddressBytes();
@@ -58,6 +61,9 @@ public static class LocalNetwork
     }
 
     /// <summary>Wake-on-LAN 唤醒包：6 个 0xFF 加 16 遍 MAC 地址。</summary>
+    /// <param name="mac">MAC 地址，格式见 <see cref="Validation.IsMacAddress"/>。</param>
+    /// <returns>102 字节的唤醒包。</returns>
+    /// <exception cref="ArgumentException"><paramref name="mac"/> 格式不对。</exception>
     internal static byte[] MagicPacket(string mac)
     {
         if (!Validation.IsMacAddress(mac))
@@ -79,7 +85,10 @@ public static class LocalNetwork
     /// <summary>
     /// 向全局广播地址和每块网卡所在网段的广播地址发唤醒包。单个地址发送失败不影响其他地址。
     /// </summary>
+    /// <param name="macs">要唤醒的 MAC 地址；每个都发到每个广播地址的 <see cref="WakePorts"/> 端口。</param>
+    /// <param name="cancellationToken">取消发送。</param>
     /// <returns>成功发出的包数。</returns>
+    /// <exception cref="ArgumentException">某个 MAC 地址格式不对。</exception>
     public static async Task<int> SendWakeAsync(IReadOnlyList<string> macs, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(macs);

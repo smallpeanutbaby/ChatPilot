@@ -17,9 +17,13 @@ public sealed record TargetRef(string? Device, string Value)
     public bool IsIndex => Value.All(char.IsAsciiDigit) && Value.Length is > 0 and <= 4;
 
     /// <summary>还原成用户写的形式，例如 <c>mac/tideq</c>。</summary>
+    /// <returns>没指定设备时就是 <see cref="Value"/>，否则是 <c>设备/目标</c>。</returns>
     public override string ToString() => Device is null ? Value : $"{Device}/{Value}";
 
     /// <summary>解析目标；格式不对（有空格、多个斜杠、设备名不合法）返回 null。</summary>
+    /// <param name="token">用户写的一个词，例如 <c>2</c>、<c>tideq</c>、<c>mac/w1:p2</c>。</param>
+    /// <returns>解析出的目标；为空、超过 100 个字符、有空白、斜杠多于一个、设备名不合法或斜杠后为空时为 null。</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="token"/> 为 null。</exception>
     public static TargetRef? TryParse(string token)
     {
         ArgumentNullException.ThrowIfNull(token);
@@ -188,11 +192,15 @@ public static partial class ChatCommandParser
     /// <summary><c>/at</c> 最远能定到多久以后。</summary>
     internal static readonly TimeSpan MaxScheduleDelay = TimeSpan.FromDays(7);
 
+    /// <summary>分隔参数的空白字符，包括中文输入法打出的全角空格。</summary>
     private static readonly char[] Whitespace = [' ', '\t', '\n', '\r', '　'];
 
+    /// <summary><c>/close 目标</c> 后面表示“确认关闭”的词（不区分大小写）。</summary>
     private static readonly string[] ConfirmWords = ["确认", "confirm", "yes", "y"];
 
     /// <summary>解析一条聊天消息；不会抛异常，格式不对时返回 <see cref="ChatInvalid"/>。</summary>
+    /// <param name="input">主人发来的原文；为 null 当作空消息。</param>
+    /// <returns>解析出的指令；不以 <c>/</c> 或 <c>@</c> 开头的文字是 <see cref="ChatButlerPrompt"/>，格式不对时是带用法提示的 <see cref="ChatInvalid"/>。</returns>
     public static ChatCommand Parse(string? input)
     {
         var text = (input ?? "").Trim();
@@ -278,6 +286,10 @@ public static partial class ChatCommandParser
     }
 
     /// <summary>可以不写目标的指令：0 个参数用默认目标，1 个参数是目标。</summary>
+    /// <param name="args">指令名后面的参数。</param>
+    /// <param name="usage">格式不对时显示的用法。</param>
+    /// <param name="create">用解析出的目标（没写时为 null）创建指令。</param>
+    /// <returns>创建的指令；参数多于一个或目标格式不对时为 <see cref="ChatInvalid"/>。</returns>
     private static ChatCommand ParseOptionalTarget(List<string> args, string usage, Func<TargetRef?, ChatCommand> create) => args.Count switch
     {
         0 => create(null),
@@ -285,6 +297,9 @@ public static partial class ChatCommandParser
         _ => Usage(usage),
     };
 
+    /// <summary><c>/re 内容</c>：内容原样保留，不分词。</summary>
+    /// <param name="body">指令名后面的全部文字（已去掉首尾空白）。</param>
+    /// <returns><see cref="ChatReply"/>；内容为空或太长时为 <see cref="ChatInvalid"/>。</returns>
     private static ChatCommand ParseReply(string body)
     {
         if (body.Length == 0)
@@ -298,6 +313,8 @@ public static partial class ChatCommandParser
     }
 
     /// <summary><c>/diff [目标] [文件]</c>：要看单个文件时必须写目标（不然分不清是目标还是文件）。</summary>
+    /// <param name="args">指令名后面的参数。</param>
+    /// <returns><see cref="ChatDiff"/>；参数太多、目标格式不对或文件路径不是仓库内的相对路径时为 <see cref="ChatInvalid"/>。</returns>
     private static ChatCommand ParseDiff(List<string> args)
     {
         const string usage = "/diff [目标] [文件]（看单个文件时要写目标，例如 /diff tideq src/app.ts）";
@@ -319,6 +336,9 @@ public static partial class ChatCommandParser
         return new ChatDiff(target, args.Count == 2 ? args[1] : null);
     }
 
+    /// <summary><c>/close 目标 [确认]</c>：第二个参数只能是 <c>确认</c>、<c>confirm</c>、<c>yes</c> 或 <c>y</c>。</summary>
+    /// <param name="args">指令名后面的参数。</param>
+    /// <returns><see cref="ChatClose"/>；格式不对时为 <see cref="ChatInvalid"/>。</returns>
     private static ChatCommand ParseClose(List<string> args)
     {
         if (args.Count is < 1 or > 2 || TargetRef.TryParse(args[0]) is not { } target)
@@ -335,6 +355,9 @@ public static partial class ChatCommandParser
     }
 
     /// <summary><c>/watch</c>、<c>/watch 目标</c>、<c>/watch all [设备]</c>；<c>/unwatch</c> 同理但必须写目标或 all。</summary>
+    /// <param name="args">指令名后面的参数。</param>
+    /// <param name="enable"><c>true</c> 是 <c>/watch</c>，<c>false</c> 是 <c>/unwatch</c>。</param>
+    /// <returns><see cref="ChatWatchList"/>、<see cref="ChatWatch"/> 或 <see cref="ChatWatchAll"/>；格式不对时为 <see cref="ChatInvalid"/>。</returns>
     private static ChatCommand ParseWatch(List<string> args, bool enable)
     {
         var usage = enable ? "/watch [目标 | all [设备]]" : "/unwatch 目标 | all [设备]";
@@ -356,6 +379,9 @@ public static partial class ChatCommandParser
         return args.Count == 1 && TargetRef.TryParse(args[0]) is { } target ? new ChatWatch(target, enable) : Usage(usage);
     }
 
+    /// <summary><c>/history [条数]</c>：不写条数时显示 10 条。</summary>
+    /// <param name="args">指令名后面的参数。</param>
+    /// <returns><see cref="ChatHistory"/>；条数不是 1 到 <see cref="MaxHistory"/> 之间的数字时为 <see cref="ChatInvalid"/>。</returns>
     private static ChatCommand ParseHistory(List<string> args)
     {
         if (args.Count == 0)
@@ -372,6 +398,11 @@ public static partial class ChatCommandParser
     /// <c>/at</c>：不带参数列出，<c>/at del 编号</c> 取消，<c>/at 时间 内容</c> 新建。
     /// 时间可以是 <c>23:00</c>（今天已过就是明天）、<c>明天 9:00</c>、<c>30m</c>、<c>2h</c>、<c>1h30m</c>、<c>45分钟</c>、<c>2小时</c>。
     /// </summary>
+    /// <param name="rest">指令名后面的全部文字（已去掉首尾空白），内容部分原样保留。</param>
+    /// <returns>
+    /// <see cref="ChatAtList"/>、<see cref="ChatAtCancel"/> 或 <see cref="ChatAt"/>；时间格式不对、没写内容、
+    /// 内容不是 <c>@目标 内容</c> 或交给管家的文字时为 <see cref="ChatInvalid"/>。
+    /// </returns>
     private static ChatCommand ParseAt(string rest)
     {
         const string usage = "/at 时间 @目标 内容，例如 /at 23:00 @api 跑全量测试、/at 30m @2 看看测试结果、/at 明天 9:00 整理日报。/at 列出定时任务，/at del 编号 取消";
@@ -407,6 +438,11 @@ public static partial class ChatCommandParser
     }
 
     /// <summary>解析 <c>/at</c> 的时间；格式不对或超出范围返回 null。</summary>
+    /// <param name="token">时间，例如 <c>23:00</c>、<c>23：00</c>、<c>30m</c>、<c>1h30m</c>、<c>2小时</c>。</param>
+    /// <param name="tomorrow">前面写了“明天”；这时只能跟时刻，不能跟时长。</param>
+    /// <returns>
+    /// 解析出的时间；时刻超出 0:00–23:59、时长不到 1 分钟或超过 <see cref="MaxScheduleDelay"/>、格式不对时为 null。
+    /// </returns>
     internal static ScheduleTime? ParseTime(string token, bool tomorrow)
     {
         var clock = ClockRegex().Match(token);
@@ -430,18 +466,27 @@ public static partial class ChatCommandParser
     }
 
     /// <summary>按第一个空白切开：第一个词，和后面原样保留的部分。</summary>
+    /// <param name="text">要切开的文字。</param>
+    /// <returns>第一个词和去掉首尾空白的其余部分；没有空白时其余部分为空字符串。</returns>
     private static (string First, string Remainder) SplitFirst(string text)
     {
         var index = text.IndexOfAny(Whitespace);
         return index < 0 ? (text, "") : (text[..index], text[(index + 1)..].Trim());
     }
 
+    /// <summary>时刻 <c>时:分</c>，冒号可以是全角的；范围由调用方检查。</summary>
+    /// <returns>编译期生成的正则，第 1 组是小时，第 2 组是分钟。</returns>
     [GeneratedRegex(@"^(\d{1,2})[:：](\d{2})\z", RegexOptions.CultureInvariant)]
     private static partial Regex ClockRegex();
 
+    /// <summary>时长：小时（<c>h</c>、<c>小时</c>）和分钟（<c>m</c>、<c>min</c>、<c>分钟</c>、<c>分</c>）都可以省略，但不能都省略（由调用方检查）。</summary>
+    /// <returns>编译期生成的正则，第 1 组是小时，第 2 组是分钟。</returns>
     [GeneratedRegex(@"^(?:(\d{1,3})(?:h|小时))?(?:(\d{1,5})(?:m|min|分钟|分))?\z", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
     private static partial Regex DelayRegex();
 
+    /// <summary><c>@目标 内容</c>：目标和内容之间要有空白，内容原样保留。</summary>
+    /// <param name="rest"><c>@</c> 后面的全部文字。</param>
+    /// <returns><see cref="ChatPrompt"/>；目标格式不对、没写内容或内容太长时为 <see cref="ChatInvalid"/>。</returns>
     private static ChatCommand ParsePrompt(string rest)
     {
         var split = rest.IndexOfAny([' ', '\t', '\n', '\r', '　']);
@@ -462,6 +507,9 @@ public static partial class ChatCommandParser
             : new ChatPrompt(target, body);
     }
 
+    /// <summary><c>/read [目标] [行数]</c>：要写行数时必须先写目标。</summary>
+    /// <param name="args">指令名后面的参数。</param>
+    /// <returns><see cref="ChatRead"/>（不写行数时用默认行数）；格式不对或行数超出范围时为 <see cref="ChatInvalid"/>。</returns>
     private static ChatCommand ParseRead(List<string> args)
     {
         if (args.Count == 0)
@@ -484,6 +532,8 @@ public static partial class ChatCommandParser
     }
 
     /// <summary><c>/new [设备] 目录 [类型] [名字]</c>：第一个参数不像路径时当作设备名。</summary>
+    /// <param name="args">指令名后面的参数。</param>
+    /// <returns><see cref="ChatNew"/>（类型转成小写）；目录不像路径，或设备名、类型、名字格式不对时为 <see cref="ChatInvalid"/>。</returns>
     private static ChatCommand ParseNew(List<string> args)
     {
         const string usage = "/new [设备] 目录 [类型] [名字]（目录要写绝对路径或以 ~ 开头）";
@@ -519,6 +569,9 @@ public static partial class ChatCommandParser
         return new ChatNew(device, args[0], kind, name);
     }
 
+    /// <summary><c>/keys 目标 按键…</c>：按键转成小写，必须都在白名单里，数量有上限。</summary>
+    /// <param name="args">指令名后面的参数。</param>
+    /// <returns><see cref="ChatKeys"/>；格式不对、按键太多或有不允许的按键时为 <see cref="ChatInvalid"/>（列出允许的按键）。</returns>
     private static ChatCommand ParseKeys(List<string> args)
     {
         if (args.Count < 2 || TargetRef.TryParse(args[0]) is not { } target)
@@ -538,6 +591,9 @@ public static partial class ChatCommandParser
             : new ChatInvalid($"不允许的按键：{string.Join(" ", rejected)}。允许：{string.Join(" ", Validation.AllowedKeys.Order(StringComparer.Ordinal))}");
     }
 
+    /// <summary><c>/name 目标 新名字</c>。</summary>
+    /// <param name="args">指令名后面的参数。</param>
+    /// <returns><see cref="ChatRename"/>；格式不对或新名字不合法时为 <see cref="ChatInvalid"/>。</returns>
     private static ChatCommand ParseRename(List<string> args)
     {
         if (args.Count != 2 || TargetRef.TryParse(args[0]) is not { } target)
@@ -550,6 +606,9 @@ public static partial class ChatCommandParser
             : new ChatInvalid("名字只能用小写字母开头，包含小写字母、数字、下划线、短横线，最长 32 位");
     }
 
+    /// <summary><c>/pair [设备名]</c>。</summary>
+    /// <param name="args">指令名后面的参数。</param>
+    /// <returns><see cref="ChatPair"/>；参数多于一个或设备名不合法时为 <see cref="ChatInvalid"/>。</returns>
     private static ChatCommand ParsePair(List<string> args)
     {
         if (args.Count > 1)
@@ -564,12 +623,17 @@ public static partial class ChatCommandParser
     }
 
     /// <summary>Unix 绝对路径、~ 开头、Windows 盘符路径或 UNC 路径。</summary>
+    /// <param name="token">一个参数。</param>
+    /// <returns>看起来像目录路径时为 <c>true</c>；只看格式，不检查是否存在。</returns>
     internal static bool LooksLikePath(string token) =>
         token.StartsWith('/') || token == "~" || token.StartsWith("~/", StringComparison.Ordinal) || token.StartsWith("~\\", StringComparison.Ordinal)
         || (token.Length >= 3 && char.IsAsciiLetter(token[0]) && token[1] == ':' && token[2] is '\\' or '/')
         || token.StartsWith(@"\\", StringComparison.Ordinal);
 
     /// <summary>按空白切分，支持用 "…" 或 “…” 包住带空格的参数。</summary>
+    /// <param name="text">要切分的文字。</param>
+    /// <param name="tokens">切出的参数（引号已去掉，<c>""</c> 得到空字符串参数）。</param>
+    /// <returns>引号都配对时为 <c>true</c>；有没闭合的引号时为 <c>false</c>。</returns>
     internal static bool TryTokenize(string text, out List<string> tokens)
     {
         tokens = [];
@@ -626,7 +690,13 @@ public static partial class ChatCommandParser
         return true;
     }
 
+    /// <summary>和开引号配对的闭引号：中文左引号配中文右引号，英文引号配它自己。</summary>
+    /// <param name="open">开引号。</param>
+    /// <returns>对应的闭引号。</returns>
     private static char ClosingQuote(char open) => open == '“' ? '”' : '"';
 
+    /// <summary>用法提示。</summary>
+    /// <param name="usage">指令的用法，例如 <c>/use 设备名</c>。</param>
+    /// <returns>以“用法：”开头的 <see cref="ChatInvalid"/>。</returns>
     private static ChatInvalid Usage(string usage) => new("用法：" + usage);
 }

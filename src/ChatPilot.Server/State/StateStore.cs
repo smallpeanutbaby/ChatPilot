@@ -94,13 +94,18 @@ public sealed record DeviceRecord
 /// </summary>
 public sealed class StateStore
 {
+    /// <summary>状态文件的序列化设置：驼峰命名、带缩进，方便管理员直接查看。</summary>
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
+    /// <summary>保护 <c>_state</c> 和写盘，所有读写都在这把锁里进行。</summary>
     private readonly Lock _lock = new();
+    /// <summary><c>state.json</c> 的完整路径。</summary>
     private readonly string _path;
+    /// <summary>当前状态。<see cref="Update"/> 成功写盘后整体替换成新对象。</summary>
     private ServerState _state;
 
     /// <summary>从数据目录加载状态；文件不存在时从空状态开始。</summary>
+    /// <param name="dataDirectory">服务器的数据目录；不存在时创建（新建的目录只有本人可访问）。</param>
     /// <exception cref="InvalidDataException">状态文件已损坏。</exception>
     public StateStore(string dataDirectory)
     {
@@ -127,6 +132,10 @@ public sealed class StateStore
     public string FilePath => _path;
 
     /// <summary>在锁内读取。投影函数应当只返回值或副本，不要把内部对象带出去。</summary>
+    /// <typeparam name="T">读出的值的类型。</typeparam>
+    /// <param name="projection">从当前状态里取出需要的值。</param>
+    /// <returns>投影函数的返回值。</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="projection"/> 为 null。</exception>
     public T Read<T>(Func<ServerState, T> projection)
     {
         ArgumentNullException.ThrowIfNull(projection);
@@ -140,6 +149,10 @@ public sealed class StateStore
     /// 事务式修改：在副本上修改并写盘，成功后才替换内存里的状态。
     /// 写盘失败时抛出异常，内存状态保持不变，不会出现"内存改了、文件没改"的情况。
     /// </summary>
+    /// <param name="mutation">对状态副本做的修改；它抛出异常时同样什么都不改。</param>
+    /// <exception cref="ArgumentNullException"><paramref name="mutation"/> 为 null。</exception>
+    /// <exception cref="IOException">写盘失败，内存里的状态保持不变。</exception>
+    /// <exception cref="UnauthorizedAccessException">没有权限写状态文件，内存里的状态保持不变。</exception>
     public void Update(Action<ServerState> mutation)
     {
         ArgumentNullException.ThrowIfNull(mutation);
@@ -156,6 +169,9 @@ public sealed class StateStore
     /// 尽力修改：内存里一定生效，写盘失败只返回 false，不抛异常。
     /// 用于不关键的数据（最后在线时间、同步游标），以及必须立即生效的撤销设备。
     /// </summary>
+    /// <param name="mutation">直接对当前状态做的修改。</param>
+    /// <returns>写盘成功为 <c>true</c>；文件写不进去为 <c>false</c>（内存里已经改了）。</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="mutation"/> 为 null。</exception>
     public bool UpdateBestEffort(Action<ServerState> mutation)
     {
         ArgumentNullException.ThrowIfNull(mutation);
@@ -174,18 +190,26 @@ public sealed class StateStore
         }
     }
 
+    /// <summary>通过一次序列化往返做深拷贝，<see cref="Update"/> 在副本上修改，失败时不影响原状态。</summary>
+    /// <param name="state">要复制的状态。</param>
+    /// <returns>和原状态互不共享对象的副本。</returns>
     private static ServerState Clone(ServerState state) =>
         JsonSerializer.Deserialize<ServerState>(JsonSerializer.Serialize(state, JsonOptions), JsonOptions) ?? new ServerState();
 
     /// <summary>所有设备（副本）。</summary>
+    /// <returns>按配对顺序排列的设备；还没有配对的设备时为空列表。</returns>
     public IReadOnlyList<DeviceRecord> Devices() => Read(s => s.Devices.ToList());
 
     /// <summary>按设备 ID 或设备名（不区分大小写）找设备。</summary>
+    /// <param name="idOrName">设备 ID 或设备名；先按 ID 精确匹配，再按名字匹配。</param>
+    /// <returns>找到的设备；没有时为 null。</returns>
     public DeviceRecord? FindDevice(string idOrName) =>
         Read(s => s.Devices.FirstOrDefault(d => d.Id == idOrName)
             ?? s.Devices.FirstOrDefault(d => string.Equals(d.Name, idOrName, StringComparison.OrdinalIgnoreCase)));
 
     /// <summary>按令牌找设备。逐个用定长时间比较，不因匹配位置不同而泄露时间信息。</summary>
+    /// <param name="token">节点出示的设备令牌明文。</param>
+    /// <returns>令牌对应的设备；令牌为空、超过 256 个字符或不匹配任何设备时为 null。</returns>
     public DeviceRecord? FindDeviceByToken(string? token)
     {
         if (string.IsNullOrEmpty(token) || token.Length > 256)
@@ -210,6 +234,7 @@ public sealed class StateStore
     }
 
     /// <summary>微信绑定信息的副本；还没绑定时为 null。</summary>
+    /// <returns>绑定信息的副本，改它不影响保存的状态；还没绑定时为 null。</returns>
     public WeChatAccount? WeChatSnapshot() => Read(s => s.WeChat is null ? null : new WeChatAccount
     {
         BotId = s.WeChat.BotId,
@@ -222,6 +247,8 @@ public sealed class StateStore
     });
 
     /// <summary>设备令牌的 SHA-256（十六进制小写）。</summary>
+    /// <param name="token">设备令牌明文。</param>
+    /// <returns>64 位十六进制小写的哈希，和 <see cref="DeviceRecord.TokenHash"/> 比较用。</returns>
     public static string HashToken(string token) =>
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
 }
