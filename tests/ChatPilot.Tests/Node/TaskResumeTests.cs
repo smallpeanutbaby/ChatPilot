@@ -27,8 +27,9 @@ public sealed class TaskResumeTests : IDisposable
         var tasks = Tasks();
         await using (var tracker = Tracker(sink, tasks))
         {
+            // 跟踪方随时可能写盘，这时只看内存里的记录：Windows 上测试读文件会让节点那次写盘失败。
             Assert.True((await Executor(tracker).ExecuteAsync(new PromptCommand(agent.PaneId, "只回复：收到"), CancellationToken.None)).Ok);
-            Assert.Equal("只回复：收到", Assert.Single(Tasks().Snapshot()).Prompt);
+            Assert.Equal("只回复：收到", Assert.Single(tasks.Snapshot()).Prompt);
             Assert.Equal(AgentEventKind.Completed, (await sink.WaitAsync()).Kind);
 
             // 结果还没发到服务器（比如正好断网），记录要留着。
@@ -38,12 +39,43 @@ public sealed class TaskResumeTests : IDisposable
 
         // 节点重启：结果再报一次，这次发出去了，记录删掉。
         var again = new RecordingSink();
-        await using var restarted = Tracker(again, Tasks());
+        var reloaded = Tasks();
+        await using var restarted = Tracker(again, reloaded);
         restarted.ResumeTrackedTasks();
         var ev = await again.WaitAsync();
         Assert.Equal(AgentEventKind.Completed, ev.Kind);
         Assert.Equal("收到", ev.Text);
-        await DevChat.EventuallyAsync(() => Task.FromResult(Tasks().Snapshot().Count == 0), "结果发出后应该删掉记录");
+        await DevChat.EventuallyAsync(() => Task.FromResult(reloaded.Snapshot().Count == 0), "结果发出后应该删掉记录");
+        Assert.Empty(Tasks().Snapshot());
+    }
+
+    [Fact]
+    public async Task A_new_task_does_not_wipe_a_result_still_waiting_to_reach_the_server()
+    {
+        // 审查：断网时第一条做完、结果还在节点内存里，接着发出的第二条不能把第一条的记录删掉，否则节点一重启这个结果就丢了。
+        var agent = _herdr.AddAgent("tideq", "TideQ");
+        var sink = new RecordingSink { DeliverImmediately = false };
+        await using (var tracker = Tracker(sink, Tasks()))
+        {
+            var executor = Executor(tracker);
+            Assert.True((await executor.ExecuteAsync(new PromptCommand(agent.PaneId, "一"), CancellationToken.None)).Ok);
+            Assert.Equal("一", (await sink.WaitAsync()).Prompt);
+            await DevChat.EventuallyAsync(() => Task.FromResult(!tracker.IsTracking(agent.PaneId)), "第一条的跟踪应该结束");
+            Assert.True((await executor.ExecuteAsync(new PromptCommand(agent.PaneId, "二"), CancellationToken.None)).Ok);
+            Assert.Equal("二", (await sink.WaitAsync()).Prompt);
+            Assert.Equal(["一", "二"], Tasks().Snapshot().Select(t => t.Prompt));
+        }
+
+        // 节点重启：两个结果都原样再发一次，送到之后记录删掉。
+        var again = new RecordingSink();
+        var reloaded = Tasks();
+        await using var restarted = Tracker(again, reloaded);
+        restarted.ResumeTrackedTasks();
+        AgentEvent[] events = [await again.WaitAsync(), await again.WaitAsync()];
+        Assert.Equal(["一", "二"], events.Select(e => e.Prompt));
+        Assert.All(events, e => Assert.Equal((AgentEventKind.Completed, "收到"), (e.Kind, e.Text)));
+        Assert.Empty(reloaded.Snapshot());
+        Assert.Empty(Tasks().Snapshot());
     }
 
     [Fact]

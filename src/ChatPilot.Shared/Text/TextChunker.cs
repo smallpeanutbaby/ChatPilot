@@ -13,6 +13,11 @@ public static class TextChunker
     /// 切成每段不超过 <paramref name="maxChunkChars"/> 个字符、最多 <paramref name="maxChunks"/> 段。
     /// 放不下的部分截断并在最后一段末尾加提示；全是空白的段会被跳过。
     /// </summary>
+    /// <param name="text">要切分的文本。</param>
+    /// <param name="maxChunkChars">每段最多多少个 UTF-16 字符，至少要比 <see cref="TruncatedNotice"/> 长 16。</param>
+    /// <param name="maxChunks">最多几段，至少 1。</param>
+    /// <returns>切好的各段；文本为空或全是空白时为空列表。</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxChunkChars"/> 或 <paramref name="maxChunks"/> 太小。</exception>
     public static IReadOnlyList<string> Split(string text, int maxChunkChars, int maxChunks)
     {
         ArgumentNullException.ThrowIfNull(text);
@@ -67,6 +72,9 @@ public static class TextChunker
     }
 
     /// <summary>截取最多 <paramref name="maxChars"/> 个 UTF-16 字符，不拆开代理对和组合字符。</summary>
+    /// <param name="text">原文。</param>
+    /// <param name="maxChars">结果的最大长度（含末尾的 <c>…</c>）。</param>
+    /// <returns>没超长时原样返回；超长时截短并以 <c>…</c> 结尾。</returns>
     public static string Truncate(string text, int maxChars)
     {
         ArgumentNullException.ThrowIfNull(text);
@@ -78,6 +86,10 @@ public static class TextChunker
         return SafePrefix(text, Math.Max(0, maxChars - 1)).ToString() + "…";
     }
 
+    /// <summary>按字符元素（text element）取不超过 <paramref name="maxChars"/> 个 UTF-16 字符的前缀，保证不切开一个字。</summary>
+    /// <param name="text">原文。</param>
+    /// <param name="maxChars">前缀的最大长度。</param>
+    /// <returns>原文的前缀；第一个字就超长时为空。</returns>
     private static ReadOnlySpan<char> SafePrefix(ReadOnlySpan<char> text, int maxChars)
     {
         if (text.Length <= maxChars)
@@ -102,6 +114,8 @@ public static class TextChunker
     }
 
     /// <summary>去掉每行末尾空白和首尾空行。</summary>
+    /// <param name="lines">各行文字（不含换行符）。</param>
+    /// <returns>用 <c>\n</c> 连起来的文本。</returns>
     public static string TrimLines(IEnumerable<string> lines)
     {
         var builder = new StringBuilder();

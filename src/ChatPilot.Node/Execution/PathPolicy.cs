@@ -14,12 +14,17 @@ namespace ChatPilot.Node.Execution;
 /// </remarks>
 public sealed class PathPolicy
 {
+    /// <summary>解析一个路径时最多跟这么多次符号链接，防止链接成环。</summary>
     private const int MaxLinkHops = 40;
 
+    /// <summary>实际存在的允许目录，已解析符号链接、去重；第二步检查用它。</summary>
     private readonly IReadOnlyList<string> _roots;
+
+    /// <summary>第一步纯字符串检查用的目录：配置里写的路径加上解析后的真实路径。</summary>
     private readonly IReadOnlyList<string> _lexicalRoots;
 
     /// <summary>根据配置的允许目录创建白名单；不存在的目录会被忽略。</summary>
+    /// <param name="roots">配置的允许目录，可以以 <c>~</c> 开头；不是绝对路径的忽略。</param>
     public PathPolicy(IEnumerable<string> roots)
     {
         ArgumentNullException.ThrowIfNull(roots);
@@ -48,10 +53,15 @@ public sealed class PathPolicy
     public static StringComparer PathComparer { get; } =
         OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
+    /// <summary>和 <see cref="PathComparer"/> 一样的大小写规则，用于前缀比较。</summary>
     private static StringComparison PathComparison =>
         OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 
     /// <summary>检查目录是否允许；允许时 <paramref name="resolved"/> 是解析符号链接后的真实路径。</summary>
+    /// <param name="input">用户给的目录，必须是绝对路径或以 <c>~</c> 开头。</param>
+    /// <param name="resolved">允许时为解析符号链接后的真实路径；不允许时为空字符串。</param>
+    /// <param name="error">不允许时给用户看的原因；允许时为空字符串。</param>
+    /// <returns>目录存在且在白名单内为 true。</returns>
     public bool TryResolve(string? input, out string resolved, out string error)
     {
         resolved = "";
@@ -121,12 +131,16 @@ public sealed class PathPolicy
         return true;
     }
 
+    /// <summary>目录不在白名单内时的提示，列出允许的目录，方便用户改。</summary>
+    /// <returns>提示文字；没有配置任何允许目录时提示去配置 <c>AllowedRoots</c>。</returns>
     private string OutsideMessage() =>
         _roots.Count == 0
             ? "这台设备没有配置允许的目录（AllowedRoots）"
             : "不在允许的目录内。允许的目录：" + string.Join("、", _roots);
 
     /// <summary>把开头的 <c>~</c> 换成用户主目录（不支持 <c>~user</c> 写法）。</summary>
+    /// <param name="path">要展开的路径。</param>
+    /// <returns>展开后的路径；不以 <c>~</c>、<c>~/</c> 或 <c>~\</c> 开头时原样返回。</returns>
     public static string ExpandHome(string path)
     {
         ArgumentNullException.ThrowIfNull(path);
@@ -140,6 +154,10 @@ public sealed class PathPolicy
             : path;
     }
 
+    /// <summary>纯字符串判断路径是不是根目录本身或在它下面；按完整的一级目录比，<c>/a/bc</c> 不算在 <c>/a/b</c> 里。</summary>
+    /// <param name="path">已规范化的完整路径。</param>
+    /// <param name="root">允许的目录。</param>
+    /// <returns>在根目录内（含根目录本身）为 true。</returns>
     private static bool IsWithin(string path, string root)
     {
         if (string.Equals(path, root, PathComparison))
@@ -152,12 +170,22 @@ public sealed class PathPolicy
     }
 
     /// <summary>从根开始逐级解析符号链接，得到真实路径。</summary>
+    /// <param name="fullPath">已规范化的绝对路径。</param>
+    /// <returns>每一级都解析过符号链接的真实路径。</returns>
+    /// <exception cref="IOException">符号链接层数超过 <see cref="MaxLinkHops"/>（多半是链接成环）。</exception>
+    /// <exception cref="ArgumentException">路径不是绝对路径。</exception>
     internal static string ResolveRealPath(string fullPath)
     {
         var hops = 0;
         return Resolve(fullPath, ref hops);
     }
 
+    /// <summary><see cref="ResolveRealPath"/> 的递归实现：链接目标里的链接也要解析，跳转次数累计在一起算。</summary>
+    /// <param name="fullPath">已规范化的绝对路径。</param>
+    /// <param name="hops">到目前为止跟过的符号链接次数。</param>
+    /// <returns>解析后的真实路径。</returns>
+    /// <exception cref="IOException">符号链接层数超过 <see cref="MaxLinkHops"/>。</exception>
+    /// <exception cref="ArgumentException">路径不是绝对路径。</exception>
     private static string Resolve(string fullPath, ref int hops)
     {
         var root = Path.GetPathRoot(fullPath) ?? throw new ArgumentException("不是绝对路径", nameof(fullPath));

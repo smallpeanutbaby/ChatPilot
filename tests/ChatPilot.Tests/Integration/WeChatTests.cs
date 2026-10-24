@@ -245,6 +245,36 @@ public sealed class WeChatChannelTests : IDisposable
     }
 
     [Fact]
+    public async Task Messages_that_arrive_too_late_are_reported_instead_of_run()
+    {
+        // 审查 #3：iLink 的消息带 create_time_ms；晚了超过 10 分钟的不执行，告诉主人。没带时间的照常处理。
+        SeedAccount("buf0");
+        var ilink = new FakeILink();
+        await using var factory = CreateFactory(ilink);
+        using var client = factory.CreateClient();
+        await ilink.Updates.Writer.WriteAsync(new
+        {
+            ret = 0,
+            get_updates_buf = "buf1",
+            msgs = new[]
+            {
+                FakeILink.Message("owner@im.wechat", "/pair 旧的", "c1", sentAt: DateTimeOffset.UtcNow.AddMinutes(-45)),
+                FakeILink.Message("owner@im.wechat", "/help", "c2", sentAt: DateTimeOffset.UtcNow),
+                FakeILink.Message("owner@im.wechat", "/devices", "c3"),
+            },
+        });
+
+        await DevChat.EventuallyAsync(() => Task.FromResult(ilink.Sent.Count >= 3), "说明和两条新消息的回复都应该发出");
+        var texts = ilink.Sent.Select(r => r.Json.GetProperty("msg").GetProperty("item_list")[0].GetProperty("text_item").GetProperty("text").GetString() ?? "").ToList();
+        Assert.StartsWith("⏰ 有 1 条消息晚到了（最早的是 45 分钟前发的", texts[0], StringComparison.Ordinal);
+        Assert.Contains("· /pair 旧的", texts[0], StringComparison.Ordinal);
+        Assert.Contains("ChatPilot 指令", texts[1], StringComparison.Ordinal);
+        Assert.StartsWith("还没有设备", texts[2], StringComparison.Ordinal);
+        Assert.DoesNotContain(texts, t => t.Contains("🔑 配对码：", StringComparison.Ordinal));
+        Assert.Equal("c3", factory.Services.GetRequiredService<StateStore>().WeChatSnapshot()?.ContextToken);
+    }
+
+    [Fact]
     public async Task Notifications_are_pushed_to_wechat_using_latest_context_token()
     {
         SeedAccount("buf0", contextToken: "ctx-last");
@@ -301,6 +331,49 @@ public sealed class WeChatChannelTests : IDisposable
     }
 
     [Fact]
+    public async Task Owner_images_are_downloaded_from_the_cdn_decrypted_and_staged()
+    {
+        // F-48：图片在微信 CDN 上，用 AES-128-ECB 加密；只接受微信的下载地址。
+        byte[] png = [0x89, (byte)'P', (byte)'N', (byte)'G', 0x0D, 0x0A, 0x1A, 0x0A, 7, 7, 7];
+        var key = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
+        using var aes = System.Security.Cryptography.Aes.Create();
+        aes.Key = key;
+        SeedAccount("buf0");
+        var ilink = new FakeILink();
+        ilink.Cdn["q=1&x"] = aes.EncryptEcb(png, System.Security.Cryptography.PaddingMode.PKCS7);
+        await using var factory = CreateFactory(ilink);
+        using var client = factory.CreateClient();
+        await ilink.Updates.Writer.WriteAsync(new
+        {
+            ret = 0,
+            get_updates_buf = "buf1",
+            msgs = new object[]
+            {
+                Image("owner@im.wechat", new { aeskey = Convert.ToHexStringLower(key), media = new { encrypt_query_param = "q=1&x" } }),
+                Image("owner@im.wechat", new { media = new { full_url = "https://evil.example.com/a.png", aes_key = Convert.ToBase64String(key) } }),
+                FakeILink.Message("owner@im.wechat", "/drop", "c3"),
+            },
+        });
+
+        await DevChat.EventuallyAsync(() => Task.FromResult(ilink.Sent.Count >= 3), "三条消息都应该得到回复");
+        var texts = ilink.Sent.Select(r => r.Json.GetProperty("msg").GetProperty("item_list")[0].GetProperty("text_item").GetProperty("text").GetString() ?? "").ToList();
+        Assert.StartsWith("🖼 收到图片（共 1 张待发）", texts[0], StringComparison.Ordinal);
+        Assert.StartsWith("❌ 图片没收到", texts[1], StringComparison.Ordinal);
+        Assert.Equal("🗑 丢掉了 1 张暂存的图片", texts[2]);
+        Assert.Single(ilink.Requests, r => r.Uri.Host == "novac2c.cdn.weixin.qq.com");
+        Assert.DoesNotContain(ilink.Requests, r => r.Uri.Host == "evil.example.com");
+
+        static object Image(string from, object imageItem) => new
+        {
+            message_id = 1UL,
+            from_user_id = from,
+            message_type = 1,
+            item_list = new[] { new { type = 2, image_item = imageItem } },
+            context_token = "c",
+        };
+    }
+
+    [Fact]
     public void Message_ids_are_parsed_without_losing_precision_and_voice_text_is_used()
     {
         // F-35
@@ -347,9 +420,13 @@ public sealed class WeChatChannelTests : IDisposable
         var registry = new ChatChannelRegistry();
         var notifier = new Notifier(registry, NullLogger<Notifier>.Instance);
         var presence = new PresenceNotifier(store, notifier, time, options, NullLogger<PresenceNotifier>.Instance);
-        var hub = new DeviceHub(store, notifier, presence, time, NullLogger<DeviceHub>.Instance);
+        var conversation = new ConversationState(time);
+        var history = new TaskHistory(_data.Path, NullLogger<TaskHistory>.Instance);
+        var hub = new DeviceHub(store, notifier, presence, conversation, history, time, NullLogger<DeviceHub>.Instance);
         var certificates = new CertificateProvider(options, NullLogger<CertificateProvider>.Instance);
-        var dispatcher = new ChatDispatcher(hub, store, new PairingService(store, time, options), new ServerIdentity(options, certificates), options, NullLogger<ChatDispatcher>.Instance);
+        var dispatcher = new ChatDispatcher(
+            hub, store, new PairingService(store, time, options), new ServerIdentity(options, certificates),
+            conversation, history, new MediaStore(time), new UserClock(time, options), options, NullLogger<ChatDispatcher>.Instance);
         var login = new WeChatLogin(client, store, options, time, NullLogger<WeChatLogin>.Instance);
         return new WeChatChannel(client, login, store, dispatcher, options, time, NullLogger<WeChatChannel>.Instance);
     }

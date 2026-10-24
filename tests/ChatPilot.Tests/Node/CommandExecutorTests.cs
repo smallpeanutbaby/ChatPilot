@@ -86,16 +86,19 @@ public sealed class CommandExecutorTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task One_watcher_per_agent_so_back_to_back_prompts_report_once()
+    public async Task One_watcher_per_agent_so_back_to_back_prompts_report_once_each()
     {
         // 审查 #6：同一个 agent 不会同时挂多个后台等待，也不会重复通知。
+        // 第二条在第一条跟踪期间发来：排队，不敲进正在干活的终端；第一条做完后才发，每条各通知一次。
         var agent = _herdr.AddAgent("tideq", "TideQ");
         _herdr.PromptDelay = TimeSpan.FromMilliseconds(500);
         Assert.True((await _executor.ExecuteAsync(new PromptCommand(agent.PaneId, "一"), CancellationToken.None)).Ok);
         Assert.True((await _executor.ExecuteAsync(new PromptCommand(agent.PaneId, "二"), CancellationToken.None)).Ok);
-        await _events.WaitAsync();
+        Assert.Single(_herdr.CallsStartingWith("agent", "prompt"));
+        Assert.Equal("一", (await _events.WaitAsync()).Prompt);
+        Assert.Equal("二", (await _events.WaitAsync()).Prompt);
         await Task.Delay(800);
-        Assert.Single(_events.Received);
+        Assert.Equal(2, _events.Received.Count);
     }
 
     [Fact]

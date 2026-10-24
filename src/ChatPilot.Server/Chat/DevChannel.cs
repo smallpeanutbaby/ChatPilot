@@ -24,13 +24,16 @@ public sealed record DevEventsResponse(IReadOnlyList<string> Events);
 /// 本机测试通道：用 HTTP 模拟主人发消息，用来在没有微信的情况下验收。
 /// 默认关闭；开启后只接受回环地址，并且必须带 <c>X-ChatPilot-Dev-Token</c>。
 /// </summary>
+/// <param name="options">服务器配置，提供测试通道令牌和微信的分段规则。</param>
 public sealed class DevChannel(IOptions<ServerOptions> options) : IChatChannel
 {
     /// <summary>携带测试通道令牌的请求头。</summary>
     public const string TokenHeader = "X-ChatPilot-Dev-Token";
 
+    /// <summary>最多保留多少条没取走的通知，超过就丢最旧的，没人来取也不会无限占内存。</summary>
     private const int MaxQueued = 200;
 
+    /// <summary>等 <c>GET /dev/events</c> 取走的主动通知。</summary>
     private readonly ConcurrentQueue<string> _events = new();
 
     /// <inheritdoc />
@@ -40,6 +43,9 @@ public sealed class DevChannel(IOptions<ServerOptions> options) : IChatChannel
     public bool IsReady => true;
 
     /// <summary>把通知存进队列（最多保留 200 条），等 <c>GET /dev/events</c> 取走。</summary>
+    /// <param name="text">通知内容。</param>
+    /// <param name="cancellationToken">不使用，只是接口要求。</param>
+    /// <returns>已完成的任务，入队不会等待。</returns>
     public Task SendToOwnerAsync(string text, CancellationToken cancellationToken)
     {
         _events.Enqueue(text);
@@ -51,6 +57,7 @@ public sealed class DevChannel(IOptions<ServerOptions> options) : IChatChannel
     }
 
     /// <summary>取走所有排队的通知。</summary>
+    /// <returns>按产生顺序排列的通知；没有新通知时为空列表。</returns>
     public IReadOnlyList<string> Drain()
     {
         var drained = new List<string>();
@@ -63,6 +70,9 @@ public sealed class DevChannel(IOptions<ServerOptions> options) : IChatChannel
     }
 
     /// <summary>检查请求是否来自本机并带了正确的令牌；不通过时返回对应的错误结果。</summary>
+    /// <param name="context">当前请求。</param>
+    /// <returns>通过时为 null；不是回环地址返回 403；令牌没配置、没带或不对返回 401。</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="context"/> 为 null。</exception>
     public IResult? Authorize(HttpContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -80,6 +90,8 @@ public sealed class DevChannel(IOptions<ServerOptions> options) : IChatChannel
     }
 
     /// <summary>按微信的规则分段，让测试看到的和手机上收到的一样。</summary>
+    /// <param name="reply">完整的回复文字。</param>
+    /// <returns>分好的各段，段数不超过微信配置的上限，放不下的部分截掉并在最后一段加提示。</returns>
     public IReadOnlyList<string> Chunk(string reply) =>
         TextChunker.Split(reply, options.Value.WeChat.MaxChunkChars, options.Value.WeChat.MaxChunks);
 }

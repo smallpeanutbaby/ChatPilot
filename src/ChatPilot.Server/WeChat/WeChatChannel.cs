@@ -15,8 +15,16 @@ namespace ChatPilot.Server.WeChat;
 /// <item>收到的消息进入有序队列，由单个后台任务按顺序处理，长轮询不会被慢指令卡住，指令也不会乱序。</item>
 /// <item>出错时重试：token 失效（-14）暂停 1 小时，连续 3 次失败退避 30 秒，其他失败 2 秒后重试。</item>
 /// <item>同步游标和 context_token 写盘失败只影响重启后的恢复，不影响这一批消息的处理。</item>
+/// <item>带创建时间、并且晚到超过 <see cref="StaleCommands.MaxDelay"/> 的消息不执行，告诉主人丢掉了哪些（和 Telegram 通道一样）。</item>
 /// </list>
 /// </remarks>
+/// <param name="client">iLink 接口客户端。</param>
+/// <param name="login">没绑定时用来扫码登录。</param>
+/// <param name="store">状态文件，保存微信绑定信息、同步游标和 context_token。</param>
+/// <param name="dispatcher">处理主人发来的指令和图片。</param>
+/// <param name="options">服务器配置，提供微信的设置。</param>
+/// <param name="time">时间来源，用于重试等待，测试里可以换成假时钟。</param>
+/// <param name="logger">日志。</param>
 public sealed class WeChatChannel(
     ILinkClient client,
     WeChatLogin login,
@@ -32,12 +40,23 @@ public sealed class WeChatChannel(
     internal static readonly TimeSpan BackoffDelay = TimeSpan.FromSeconds(30);
     /// <summary>普通失败后多久重试。</summary>
     internal static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(2);
+    /// <summary>连续失败几次后改用 <see cref="BackoffDelay"/> 退避。</summary>
     private const int MaxConsecutiveFailures = 3;
+    /// <summary>最多排队多少条还没处理的消息；满了之后长轮询等待，不丢消息。</summary>
     private const int InboxCapacity = 50;
 
-    /// <summary>待处理的主人消息；null 表示收到了不支持的消息类型（图片等）。</summary>
-    private readonly Channel<string?> _inbox = Channel.CreateBounded<string?>(
+    /// <summary>待处理的主人消息。</summary>
+    private readonly Channel<Inbound> _inbox = Channel.CreateBounded<Inbound>(
         new BoundedChannelOptions(InboxCapacity) { FullMode = BoundedChannelFullMode.Wait, SingleReader = true });
+
+    /// <summary>
+    /// 一条主人的消息：文字或图片；都是 null 表示收到了不支持的消息类型（文件、视频等）。
+    /// 也可以只是一条要直接发给主人的说明（<see cref="Notice"/>）。
+    /// </summary>
+    /// <param name="Text">文字（语音消息是微信转写的文字）。</param>
+    /// <param name="Image">要下载的图片。</param>
+    /// <param name="Notice">直接发给主人的说明（例如晚到的消息被丢掉了）；有它时其他字段都不用。</param>
+    private sealed record Inbound(string? Text, ImageItem? Image, string? Notice = null);
 
     /// <inheritdoc />
     public string Name => "微信";
@@ -46,6 +65,10 @@ public sealed class WeChatChannel(
     public bool IsReady => store.Read(s => s.WeChat is not null);
 
     /// <summary>按微信的长度限制分段，带上最近的 context_token 发给主人；还没绑定时什么也不做。</summary>
+    /// <param name="text">消息内容。</param>
+    /// <param name="cancellationToken">取消发送。</param>
+    /// <returns>各段都发完后完成的任务。</returns>
+    /// <exception cref="ILinkException">某一段发送失败，后面的段不再发。</exception>
     public async Task SendToOwnerAsync(string text, CancellationToken cancellationToken)
     {
         if (store.WeChatSnapshot() is not { } account)
@@ -104,6 +127,8 @@ public sealed class WeChatChannel(
     }
 
     /// <summary>长轮询主循环；账号被清除时返回。</summary>
+    /// <param name="stoppingToken">服务器停止时取消。</param>
+    /// <returns>服务器停止或微信绑定被清除后完成的任务。iLink 接口出错在这里退避重试，不抛给调用方。</returns>
     internal async Task PollAsync(CancellationToken stoppingToken)
     {
         var timeout = TimeSpan.FromSeconds(35);
@@ -159,13 +184,45 @@ public sealed class WeChatChannel(
                 }
             }
 
+            var now = time.GetUtcNow();
+            var fresh = new List<Inbound>();
+            var stale = new List<(DateTimeOffset SentAt, string Summary)>();
             foreach (var message in response.Msgs ?? [])
             {
-                await AcceptAsync(account, message, stoppingToken).ConfigureAwait(false);
+                var items = Accept(account, message);
+                if (items.Count == 0)
+                {
+                    continue;
+                }
+
+                if (StaleCommands.FromUnixMilliseconds(message.CreateTimeMs) is { } sentAt && StaleCommands.IsStale(sentAt, now))
+                {
+                    stale.Add((sentAt,StaleCommands.Summarize(items.Select(i => i.Text).FirstOrDefault(t => t is not null), items.Any(i => i.Image is not null))));
+                }
+                else
+                {
+                    fresh.AddRange(items);
+                }
+            }
+
+            if (stale.Count > 0)
+            {
+                logger.LogWarning("丢掉 {Count} 条晚到超过 {Minutes} 分钟的微信消息", stale.Count, StaleCommands.MaxDelay.TotalMinutes);
+                await _inbox.Writer.WriteAsync(new Inbound(null, null, StaleCommands.Notice(stale, now)), stoppingToken).ConfigureAwait(false);
+            }
+
+            foreach (var item in fresh)
+            {
+                await _inbox.Writer.WriteAsync(item, stoppingToken).ConfigureAwait(false);
             }
         }
     }
 
+    /// <summary>记一次拉取失败并等待：连续失败到 <see cref="MaxConsecutiveFailures"/> 次时等 <see cref="BackoffDelay"/>，否则等 <see cref="RetryDelay"/>。</summary>
+    /// <param name="failures">这次之前连续失败的次数。</param>
+    /// <param name="reason">失败原因，写进日志。</param>
+    /// <param name="stoppingToken">服务器停止时取消。</param>
+    /// <returns>新的连续失败次数；退避过一次后从 0 重新计。</returns>
     private async Task<int> BackoffAsync(int failures, string reason, CancellationToken stoppingToken)
     {
         failures++;
@@ -180,18 +237,21 @@ public sealed class WeChatChannel(
         return failures;
     }
 
-    /// <summary>过滤一条消息：只认主人发的用户消息，放进有序队列等后台任务处理。</summary>
-    private async Task AcceptAsync(WeChatAccount account, WeixinMessage message, CancellationToken stoppingToken)
+    /// <summary>过滤一条消息：只认主人发的用户消息，整理成要放进有序队列、等后台任务处理的几条。</summary>
+    /// <param name="account">当前的微信绑定信息。</param>
+    /// <param name="message">收到的消息。带 context_token 时记下来，之后回复要用（晚到的消息也记）；图文都有时拆成先图后文两条。</param>
+    /// <returns>要处理的几条；不是主人发的用户消息时为空列表。</returns>
+    private List<Inbound> Accept(WeChatAccount account, WeixinMessage message)
     {
         if (message.MessageType != ILinkConstants.MessageTypeUser)
         {
-            return;
+            return [];
         }
 
         if (!string.Equals(message.FromUserId, account.OwnerUserId, StringComparison.Ordinal))
         {
             logger.LogWarning("忽略一条不是主人发来的消息");
-            return;
+            return [];
         }
 
         if (!string.IsNullOrEmpty(message.ContextToken))
@@ -205,21 +265,40 @@ public sealed class WeChatChannel(
             });
         }
 
-        await _inbox.Writer.WriteAsync(ExtractText(message), stoppingToken).ConfigureAwait(false);
+        var image = ExtractImage(message);
+        var text = ExtractText(message);
+        var items = new List<Inbound>();
+        if (image is not null)
+        {
+            items.Add(new Inbound(null, image));
+        }
+
+        if (text is not null || image is null)
+        {
+            items.Add(new Inbound(text, null));
+        }
+
+        return items;
     }
 
-    /// <summary>按收到的顺序逐条处理主人的消息并回复。</summary>
+    /// <summary>按收到的顺序逐条处理主人的消息并回复。图片也在这里下载，保证"先发图、再派活"的顺序。</summary>
+    /// <param name="stoppingToken">服务器停止时取消。</param>
+    /// <returns>队列关闭或服务器停止后完成的任务。单条消息出错只记日志，不会抛出。</returns>
     private async Task ProcessInboxAsync(CancellationToken stoppingToken)
     {
         try
         {
-            await foreach (var text in _inbox.Reader.ReadAllAsync(stoppingToken).ConfigureAwait(false))
+            await foreach (var item in _inbox.Reader.ReadAllAsync(stoppingToken).ConfigureAwait(false))
             {
                 try
                 {
-                    var reply = text is null
-                        ? "目前只支持文字消息（语音会自动转成文字）。发 /help 查看用法"
-                        : await dispatcher.HandleAsync(text, stoppingToken).ConfigureAwait(false);
+                    var reply = item switch
+                    {
+                        { Notice: { } notice } => notice,
+                        { Image: { } image } => await AcceptImageAsync(image, stoppingToken).ConfigureAwait(false),
+                        { Text: { } text } => await dispatcher.HandleAsync(text, stoppingToken).ConfigureAwait(false),
+                        _ => "目前只支持文字和图片消息（语音会自动转成文字）。发 /help 查看用法",
+                    };
                     await SendToOwnerAsync(reply, stoppingToken).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -234,7 +313,35 @@ public sealed class WeChatChannel(
         }
     }
 
+    /// <summary>下载并解密图片，交给指令分发器暂存。</summary>
+    /// <param name="image">消息里的图片。</param>
+    /// <param name="stoppingToken">服务器停止时取消。</param>
+    /// <returns>要回复主人的文字：暂存结果，或者下载失败的说明。</returns>
+    private async Task<string> AcceptImageAsync(ImageItem image, CancellationToken stoppingToken)
+    {
+        byte[] data;
+        try
+        {
+            data = await client.DownloadImageAsync(image, stoppingToken).ConfigureAwait(false);
+        }
+        catch (ILinkException ex)
+        {
+            logger.LogWarning("下载主人发来的图片失败：{Message}", ex.Message);
+            return "❌ 图片没收到（下载失败），请再发一次";
+        }
+
+        return await dispatcher.HandleImageAsync(data, stoppingToken).ConfigureAwait(false);
+    }
+
+    /// <summary>第一张图片。</summary>
+    /// <param name="message">收到的消息。</param>
+    /// <returns>第一张带 CDN 引用的图片；没有时为 null。</returns>
+    internal static ImageItem? ExtractImage(WeixinMessage message) =>
+        message.ItemList?.FirstOrDefault(i => i.Type == ILinkConstants.ItemTypeImage && i.ImageItem?.Media is not null)?.ImageItem;
+
     /// <summary>取第一段文字；语音消息用微信自带的语音转文字结果。</summary>
+    /// <param name="message">收到的消息。</param>
+    /// <returns>第一段非空白的文字或语音转写；都没有时为 null。</returns>
     internal static string? ExtractText(WeixinMessage message)
     {
         foreach (var item in message.ItemList ?? [])

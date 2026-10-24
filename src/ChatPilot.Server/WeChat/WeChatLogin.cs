@@ -11,6 +11,11 @@ namespace ChatPilot.Server.WeChat;
 /// 微信扫码绑定：取二维码 → 终端显示（同时保存 PNG）→ 轮询扫码状态 → 保存 bot token 和主人的微信号。
 /// 处理二维码过期刷新（最多 3 次）、IDC 重定向、手机上显示验证码需要输入等情况。
 /// </summary>
+/// <param name="client">iLink 接口客户端。</param>
+/// <param name="store">状态文件，绑定成功后把凭据保存在这里。</param>
+/// <param name="options">服务器配置，提供默认接口地址和数据目录。</param>
+/// <param name="time">时间来源，用于轮询间隔和总超时，测试里可以换成假时钟。</param>
+/// <param name="logger">日志。</param>
 public sealed partial class WeChatLogin(
     ILinkClient client,
     StateStore store,
@@ -18,7 +23,9 @@ public sealed partial class WeChatLogin(
     TimeProvider time,
     ILogger<WeChatLogin> logger)
 {
+    /// <summary>一次登录最多用几张二维码（含第一张）；过期或验证码被锁定时刷新。</summary>
     private const int MaxQrAttempts = 3;
+    /// <summary>整个登录流程最多等多久。</summary>
     private static readonly TimeSpan LoginTimeout = TimeSpan.FromMinutes(8);
 
     /// <summary>
@@ -30,6 +37,14 @@ public sealed partial class WeChatLogin(
     /// 运行一次登录流程，成功返回 true。<paramref name="askVerifyCode"/> 为空时（后台服务模式）遇到验证码就放弃，
     /// 提示用 <c>chatpilot-server login</c> 交互登录。
     /// </summary>
+    /// <param name="askVerifyCode">向用户要手机上显示的数字，参数是提示语，返回输入的内容；为 null 表示不能交互。</param>
+    /// <param name="cancellationToken">取消登录。</param>
+    /// <returns>
+    /// 绑定成功、或者这个微信已经绑定过并且本地有凭据时为 <c>true</c>；
+    /// 二维码内容不完整或多次失效、需要验证码但不能交互、凭据不完整、超时都返回 <c>false</c>（原因写在日志里）。
+    /// </returns>
+    /// <exception cref="ILinkException">请求二维码失败（网络错误、HTTP 失败、返回的不是 JSON）。轮询扫码状态的失败不会抛出。</exception>
+    /// <exception cref="IOException">凭据写盘失败。</exception>
     public async Task<bool> RunAsync(Func<string, Task<string?>>? askVerifyCode, CancellationToken cancellationToken)
     {
         var existingToken = store.WeChatSnapshot()?.BotToken;
@@ -137,6 +152,11 @@ public sealed partial class WeChatLogin(
         return false;
     }
 
+    /// <summary>
+    /// 保存扫码确认后下发的凭据，扫码人成为主人。服务器返回的接口地址只有是 https 并且属于腾讯域名时才采用，否则用配置里的。
+    /// </summary>
+    /// <param name="status">状态为 <c>confirmed</c> 的扫码结果。</param>
+    /// <returns>保存成功为 <c>true</c>；bot ID、bot token 或主人的用户 ID 缺失时为 <c>false</c>。</returns>
     private bool Save(QrStatusResponse status)
     {
         if (string.IsNullOrWhiteSpace(status.IlinkBotId) || string.IsNullOrWhiteSpace(status.BotToken) || string.IsNullOrWhiteSpace(status.IlinkUserId))
@@ -174,6 +194,8 @@ public sealed partial class WeChatLogin(
     /// 展示二维码。二维码等于"成为主人"的凭证，所以登录链接绝不写进日志：
     /// 图片保存为权限 600 的 PNG；终端字符画只在交互式登录、或者输出是真实终端（不是日志文件）时显示。
     /// </summary>
+    /// <param name="content">二维码内容（登录链接）。</param>
+    /// <param name="interactive">是否交互式登录；只有这时才把登录链接也显示出来。</param>
     private void Show(string content, bool interactive)
     {
         var png = Path.Combine(options.Value.ResolvedDataDir, "wechat-login.png");
@@ -198,6 +220,10 @@ public sealed partial class WeChatLogin(
         logger.LogInformation("微信登录二维码已保存到 {Path}（只有当前用户能读）。也可以停掉服务后运行 chatpilot-server login 在终端里扫码", png);
     }
 
+    /// <summary><see cref="ShowQrCode"/> 的默认实现：把二维码字符画和说明打印到控制台。</summary>
+    /// <param name="ascii">二维码字符画；生成失败时为空字符串。</param>
+    /// <param name="pngPath">二维码 PNG 的保存位置。</param>
+    /// <param name="link">登录链接，扫不了码时可以直接在微信里打开；非交互式登录时为 null，不打印。</param>
     private static void PrintToConsole(string ascii, string pngPath, string? link)
     {
         Console.WriteLine();
@@ -213,8 +239,12 @@ public sealed partial class WeChatLogin(
     }
 
     /// <summary>只接受腾讯的域名，防止被引导到其他服务器。</summary>
+    /// <param name="host">主机名，不含协议和端口。</param>
+    /// <returns>是 <c>qq.com</c>、<c>weixin.com</c>、<c>wechat.com</c> 或它们的子域名时为 <c>true</c>。</returns>
     internal static bool IsTrustedHost(string host) => TrustedHostRegex().IsMatch(host);
 
+    /// <summary>匹配 <c>qq.com</c>、<c>weixin.com</c>、<c>wechat.com</c> 及其子域名（不区分大小写，整串匹配）。</summary>
+    /// <returns>编译期生成的正则。</returns>
     [GeneratedRegex(@"^([a-z0-9-]+\.)*(qq|weixin|wechat)\.com\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex TrustedHostRegex();
 }

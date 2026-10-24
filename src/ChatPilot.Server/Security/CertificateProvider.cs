@@ -10,10 +10,14 @@ namespace ChatPilot.Server.Security;
 /// <summary>服务器的自签证书：首次使用时生成并保存到数据目录（权限 600），之后一直复用，指纹不变。</summary>
 public sealed class CertificateProvider : IDisposable
 {
+    /// <summary>延迟加载的证书：没开 TLS 时不会去读写证书文件；多线程同时访问也只加载一次。</summary>
     private readonly Lazy<X509Certificate2> _certificate;
     private readonly ILogger<CertificateProvider> _logger;
 
     /// <summary>证书在第一次用到时才加载或生成。</summary>
+    /// <param name="options">服务器配置，证书放在其中的数据目录下（<c>server.pfx</c>）。</param>
+    /// <param name="logger">日志。</param>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> 为 null。</exception>
     public CertificateProvider(IOptions<ServerOptions> options, ILogger<CertificateProvider> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -37,6 +41,9 @@ public sealed class CertificateProvider : IDisposable
         }
     }
 
+    /// <summary>读取已保存的证书；文件不存在时先生成一张并以只有本人可读的权限写盘。</summary>
+    /// <param name="path">证书文件路径。</param>
+    /// <returns>含私钥的证书。</returns>
     private X509Certificate2 LoadOrCreate(string path)
     {
         if (!File.Exists(path))
@@ -48,6 +55,11 @@ public sealed class CertificateProvider : IDisposable
         return X509CertificateLoader.LoadPkcs12FromFile(path, password: null);
     }
 
+    /// <summary>
+    /// 生成一张 P-256 自签服务器证书，备用名称只有 <c>localhost</c> 和回环地址，有效期 10 年。
+    /// 节点靠指纹而不是证书名字验证服务器，所以不需要和真实域名匹配。
+    /// </summary>
+    /// <returns>不加密码的 PKCS#12 数据（含私钥）。</returns>
     private static byte[] CreatePkcs12()
     {
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
@@ -68,6 +80,8 @@ public sealed class CertificateProvider : IDisposable
 }
 
 /// <summary>/pair 提示里要用的服务器信息。</summary>
+/// <param name="options">服务器配置。</param>
+/// <param name="certificates">服务器证书，用来取指纹。</param>
 public sealed class ServerIdentity(IOptions<ServerOptions> options, CertificateProvider certificates)
 {
     /// <summary>是否开启了 TLS。</summary>
