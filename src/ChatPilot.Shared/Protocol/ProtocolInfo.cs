@@ -42,6 +42,12 @@ public static class ProtocolInfo
     /// <summary>一条指令最多带几张图片。</summary>
     public const int MaxAttachments = 4;
 
+    /// <summary>
+    /// 节点下载一条指令所带全部图片的时限（秒），不占用发给 agent 的那部分时间。
+    /// 服务器等带图片的指令时，要在普通指令的等待时间上再加这么多。
+    /// </summary>
+    public const int MediaDownloadSeconds = 90;
+
     /// <summary>一次最多唤醒几个 MAC 地址（一台电脑的网卡数）。</summary>
     public const int MaxWakeAddresses = 8;
 
