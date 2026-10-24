@@ -8,12 +8,14 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using ChatPilot.Node.Herdr;
 
 namespace ChatPilot.Node.Cli;
 
 /// <summary>升级失败，<see cref="Exception.Message"/> 是给用户看的原因。</summary>
 /// <param name="message">给用户看的原因。</param>
-public sealed class UpdateException(string message) : Exception(message);
+/// <param name="innerException">引起失败的原始异常；没有时为 null。</param>
+public sealed class UpdateException(string message, Exception? innerException = null) : Exception(message, innerException);
 
 /// <summary>版本号：主.次.修订，可带预发布后缀（例如 <c>0.2.0-beta.1</c>）。</summary>
 /// <param name="Major">主版本。</param>
@@ -39,7 +41,7 @@ public sealed partial record ReleaseVersion(int Major, int Minor, int Patch, str
 
     /// <summary>比 <paramref name="other"/> 新吗。同一个版本号，正式版比预发布版新。</summary>
     /// <param name="other">要比较的版本，通常是正在运行的版本。</param>
-    /// <returns>严格更新时为 true；相同或更旧时为 false。两个预发布后缀按序数比较。</returns>
+    /// <returns>严格更新时为 true；相同或更旧时为 false。两个预发布后缀按 SemVer 规则比较，见 <see cref="ComparePrerelease"/>。</returns>
     public bool IsNewerThan(ReleaseVersion other)
     {
         ArgumentNullException.ThrowIfNull(other);
@@ -54,7 +56,7 @@ public sealed partial record ReleaseVersion(int Major, int Minor, int Patch, str
             (null, null) => false,
             (null, _) => true,
             (_, null) => false,
-            _ => string.CompareOrdinal(Prerelease, other.Prerelease) > 0,
+            _ => ComparePrerelease(Prerelease, other.Prerelease) > 0,
         };
     }
 
@@ -62,9 +64,59 @@ public sealed partial record ReleaseVersion(int Major, int Minor, int Patch, str
     public override string ToString() =>
         string.Create(CultureInfo.InvariantCulture, $"{Major}.{Minor}.{Patch}") + (Prerelease is null ? "" : "-" + Prerelease);
 
-    /// <summary>可选的 <c>v</c> 前缀、三段数字（每段最多 6 位）、可选的预发布后缀和构建信息。</summary>
+    /// <summary>
+    /// 按 SemVer 比较两个预发布后缀：按 <c>.</c> 分段逐段比较，纯数字的段按数值比（<c>beta.10</c> 比 <c>beta.9</c> 新），
+    /// 纯数字的段比带字母的段旧，带字母的段按 ASCII 比；前面的段都相同时，段多的新（<c>beta.1</c> 比 <c>beta</c> 新）。
+    /// </summary>
+    /// <param name="left">一个预发布后缀，例如 <c>beta.10</c>。</param>
+    /// <param name="right">另一个预发布后缀。</param>
+    /// <returns><paramref name="left"/> 更新时为正数，更旧时为负数，相同时为 0。</returns>
+    private static int ComparePrerelease(string left, string right)
+    {
+        var a = left.Split('.');
+        var b = right.Split('.');
+        for (var i = 0; i < Math.Min(a.Length, b.Length); i++)
+        {
+            var leftNumeric = IsNumeric(a[i]);
+            var rightNumeric = IsNumeric(b[i]);
+            var result = (leftNumeric, rightNumeric) switch
+            {
+                (true, true) => CompareNumbers(a[i], b[i]),
+                (true, false) => -1,
+                (false, true) => 1,
+                _ => Math.Sign(string.CompareOrdinal(a[i], b[i])),
+            };
+            if (result != 0)
+            {
+                return result;
+            }
+        }
+
+        return a.Length.CompareTo(b.Length);
+    }
+
+    /// <summary>预发布后缀的一段是不是纯数字。</summary>
+    /// <param name="part">一段，例如 <c>10</c> 或 <c>beta</c>。</param>
+    /// <returns>非空并且只有 ASCII 数字时为 true。</returns>
+    private static bool IsNumeric(string part) => part.Length > 0 && part.All(char.IsAsciiDigit);
+
+    /// <summary>比较两个纯数字的段，不转成整数（段最长 64 位，可能超出范围）。</summary>
+    /// <param name="left">纯数字的段。</param>
+    /// <param name="right">另一个纯数字的段。</param>
+    /// <returns><paramref name="left"/> 数值更大时为正数，更小时为负数，相等时为 0。</returns>
+    private static int CompareNumbers(string left, string right)
+    {
+        var a = left.TrimStart('0');
+        var b = right.TrimStart('0');
+        return a.Length != b.Length ? a.Length.CompareTo(b.Length) : Math.Sign(string.CompareOrdinal(a, b));
+    }
+
+    /// <summary>
+    /// 可选的 <c>v</c> 前缀、三段数字（每段最多 6 位）、可选的预发布后缀和构建信息。
+    /// 数字只认 ASCII 的 <c>[0-9]</c>：.NET 的 <c>\d</c> 还匹配其他文字的数字，<see cref="int.Parse(string, IFormatProvider)"/> 却不认。
+    /// </summary>
     /// <returns>编译期生成的正则。</returns>
-    [GeneratedRegex(@"^v?(?<major>\d{1,6})\.(?<minor>\d{1,6})\.(?<patch>\d{1,6})(?:-(?<pre>[0-9A-Za-z.-]{1,64}))?(?:\+[0-9A-Za-z.-]*)?\z", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^v?(?<major>[0-9]{1,6})\.(?<minor>[0-9]{1,6})\.(?<patch>[0-9]{1,6})(?:-(?<pre>[0-9A-Za-z.-]{1,64}))?(?:\+[0-9A-Za-z.-]*)?\z", RegexOptions.CultureInvariant)]
     private static partial Regex VersionRegex();
 }
 
@@ -83,6 +135,8 @@ public sealed record NodeRelease(ReleaseVersion Version, IReadOnlyDictionary<str
 /// <item>新程序先在这台电脑上运行一次 <c>help</c>，跑不起来（架构不对、被系统拦截）就不替换。</item>
 /// <item>替换是原子的：Linux / macOS 直接改名覆盖（正在运行的进程不受影响）；Windows 不能覆盖运行中的程序，
 /// 先把旧程序改名成 <c>.old</c>，下次启动时删掉。</item>
+/// <item>同一个程序同时只能有一个升级在进行（程序旁边的升级锁），解出来的新程序每次用不同的名字。</item>
+/// <item>下载有大小上限，读内容时卡住（一段时间没收到数据）或总时间太长都会放弃，不会一直挂着。</item>
 /// <item>只在用户自己运行 <c>chatpilot-node update</c> 时升级，不能从微信远程触发。</item>
 /// </list>
 /// </remarks>
@@ -115,6 +169,21 @@ public sealed class NodeUpdater(
 
     /// <summary>解压出来的程序的大小上限：500 MiB，防止解压炸弹。</summary>
     private const long MaxExecutableBytes = 500L * 1024 * 1024;
+
+    /// <summary>版本信息（<c>releases/latest</c> 的 JSON）的大小上限：4 MiB。</summary>
+    private const long MaxReleaseInfoBytes = 4L * 1024 * 1024;
+
+    /// <summary>Windows 上替换时旧程序最多留几个备份名（<c>.old</c>、<c>.old1</c>…<c>.old9</c>）。</summary>
+    private const int MaxBackups = 10;
+
+    /// <summary>
+    /// 读响应内容时多久没收到任何数据就放弃。收到响应头之后 <see cref="HttpClient.Timeout"/> 就不管了，
+    /// 连接半断开时读内容会一直卡住，所以自己计时。测试里改短。
+    /// </summary>
+    internal TimeSpan StallTimeout { get; init; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>读一个响应的内容最多用多久（网速很慢也够下完一个压缩包）。测试里改短。</summary>
+    internal TimeSpan BodyDeadline { get; init; } = TimeSpan.FromMinutes(30);
 
     /// <summary>是不是 Windows 平台：决定压缩包格式（zip / tar.gz）和程序名是否带 <c>.exe</c>。</summary>
     /// <param name="rid">运行时标识，例如 <c>win-x64</c>。</param>
@@ -149,7 +218,7 @@ public sealed class NodeUpdater(
     /// <summary>查最新的正式版本。</summary>
     /// <param name="cancellationToken">取消查询。</param>
     /// <returns>最新版本和它的 https 下载地址。</returns>
-    /// <exception cref="UpdateException">查不到。</exception>
+    /// <exception cref="UpdateException">查不到、读版本信息时中断或卡住、版本信息看不懂。</exception>
     public async Task<NodeRelease> GetLatestAsync(CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, new Uri($"https://api.github.com/repos/{repository}/releases/latest"));
@@ -165,9 +234,10 @@ public sealed class NodeUpdater(
             throw new UpdateException($"查询最新版本失败：GitHub 返回 {(int)response.StatusCode}");
         }
 
+        var body = await ReadBodyAsync(response, "最新版本信息", MaxReleaseInfoBytes, cancellationToken).ConfigureAwait(false);
         try
         {
-            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
+            using var document = JsonDocument.Parse(body);
             var root = document.RootElement;
             var version = ReleaseVersion.Parse(root.GetProperty("tag_name").GetString())
                 ?? throw new UpdateException("最新版本的标签不是版本号格式");
@@ -190,11 +260,19 @@ public sealed class NodeUpdater(
         }
     }
 
-    /// <summary>下载、核对、试运行，然后替换程序。</summary>
+    /// <summary>
+    /// 下载、核对、试运行，然后替换程序。整个过程拿着这个程序的升级锁（见 <see cref="UpdateLockPath"/>），
+    /// 同时运行的另一个 <c>update</c> 直接失败，不会互相覆盖解出来的新程序。
+    /// </summary>
     /// <param name="release">要安装的版本，通常来自 <see cref="GetLatestAsync"/>。</param>
     /// <param name="cancellationToken">取消下载和试运行。</param>
-    /// <exception cref="UpdateException">任何一步不通过；这时正在用的程序没有被改动。</exception>
-    public async Task InstallAsync(NodeRelease release, CancellationToken cancellationToken)
+    /// <returns>Windows 上旧程序改名后的路径（例如 <c>chatpilot-node.exe.old</c>，还在运行的旧节点用的就是它）；其他系统为 null。</returns>
+    /// <exception cref="UpdateException">
+    /// 任何一步不通过，或者另一个 <c>update</c> 正在升级这个程序；这时正在用的程序没有被改动。
+    /// 唯一的例外是 Windows 上换上新程序失败、把旧程序改回去也失败：消息里写明旧程序现在在哪。
+    /// </exception>
+    /// <exception cref="UnauthorizedAccessException">没有权限在程序所在的目录里写文件。</exception>
+    public async Task<string?> InstallAsync(NodeRelease release, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(release);
         var assetName = AssetName(runtimeIdentifier);
@@ -208,6 +286,8 @@ public sealed class NodeUpdater(
             throw new UpdateException($"版本 {release.Version} 没有校验文件 {ChecksumFile}，不安装");
         }
 
+        using var updateLock = ExclusiveFileLock.TryAcquire(UpdateLockPath(executablePath))
+            ?? throw new UpdateException("另一个 chatpilot-node update 正在升级这个程序，等它结束再试");
         var sums = Encoding.UTF8.GetString(await DownloadAsync(checksumUrl, 1024 * 1024, cancellationToken).ConfigureAwait(false));
         var expected = ParseChecksums(sums).GetValueOrDefault(assetName)
             ?? throw new UpdateException($"{ChecksumFile} 里没有 {assetName} 的校验值，不安装");
@@ -217,8 +297,9 @@ public sealed class NodeUpdater(
             throw new UpdateException("下载的文件和校验值对不上（可能损坏或被篡改），没有安装");
         }
 
+        // 每次用不同的名字，万一有别的进程绕过了升级锁，也不会互相覆盖、互相删掉对方解出来的程序。
         var directory = Path.GetDirectoryName(Path.GetFullPath(executablePath))!;
-        var staged = Path.Combine(directory, ".chatpilot-node.new" + (OperatingSystem.IsWindows() ? ".exe" : ""));
+        var staged = Path.Combine(directory, $".chatpilot-node.new-{Guid.NewGuid():N}" + (OperatingSystem.IsWindows() ? ".exe" : ""));
         try
         {
             ExtractExecutable(archive, staged);
@@ -227,7 +308,7 @@ public sealed class NodeUpdater(
                 throw new UpdateException("新版本在这台电脑上运行不起来，没有替换");
             }
 
-            Replace(staged, executablePath);
+            return Replace(staged, executablePath, OperatingSystem.IsWindows(), File.Move);
         }
         finally
         {
@@ -235,17 +316,39 @@ public sealed class NodeUpdater(
         }
     }
 
-    /// <summary>删掉 Windows 上替换时留下的旧程序（<c>.old</c>）；还在运行、删不掉的留到下次。</summary>
-    /// <param name="executablePath">当前程序的路径；删的是它旁边的 <c>程序名.old*</c>。</param>
+    /// <summary>升级锁文件：程序旁边的 <c>.chatpilot-node.update.lock</c>，每个安装位置一把。</summary>
+    /// <param name="executablePath">要升级的程序。</param>
+    /// <returns>锁文件的完整路径。</returns>
+    internal static string UpdateLockPath(string executablePath) =>
+        Path.Combine(Path.GetDirectoryName(Path.GetFullPath(executablePath))!, ".chatpilot-node.update.lock");
+
+    /// <summary>Windows 上替换时给旧程序用的备份名，按顺序是 <c>程序名.old</c>、<c>程序名.old1</c>…<c>程序名.old9</c>。</summary>
+    /// <param name="executablePath">程序的路径。</param>
+    /// <returns>这 <see cref="MaxBackups"/> 个备份的完整路径；只有这些名字是升级自己建的。</returns>
+    internal static IEnumerable<string> BackupPaths(string executablePath)
+    {
+        var full = Path.GetFullPath(executablePath);
+        return Enumerable.Range(0, MaxBackups).Select(i => full + ".old" + (i == 0 ? "" : i.ToString(CultureInfo.InvariantCulture)));
+    }
+
+    /// <summary>
+    /// 删掉 Windows 上替换时留下的旧程序。只删升级自己起的名字（<see cref="BackupPaths"/>），
+    /// 用户自己留的其他备份不碰；还在运行、删不掉或没有权限的留到下次。不会抛异常，节点启动不会因为它失败。
+    /// </summary>
+    /// <param name="executablePath">当前程序的路径；删的是它旁边的 <c>程序名.old</c>、<c>程序名.old1</c>…<c>程序名.old9</c>。</param>
     public static void CleanUpOldBinaries(string executablePath)
     {
-        var directory = Path.GetDirectoryName(Path.GetFullPath(executablePath));
-        if (directory is null || !Directory.Exists(directory))
+        IEnumerable<string> backups;
+        try
+        {
+            backups = BackupPaths(executablePath).ToList();
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or NotSupportedException or System.Security.SecurityException)
         {
             return;
         }
 
-        foreach (var old in Directory.EnumerateFiles(directory, Path.GetFileName(executablePath) + ".old*"))
+        foreach (var old in backups)
         {
             TryDelete(old);
         }
@@ -255,36 +358,22 @@ public sealed class NodeUpdater(
     /// <param name="path">要试运行的程序。</param>
     /// <param name="cancellationToken">取消试运行。</param>
     /// <returns>退出码为 0 时为 true；启动不了、超时（会结束进程）或退出码非 0 时为 false。</returns>
-    public static async Task<bool> TryRunAsync(string path, CancellationToken cancellationToken)
+    public static Task<bool> TryRunAsync(string path, CancellationToken cancellationToken) =>
+        TryRunAsync(new ProcessRunner(), path, cancellationToken);
+
+    /// <summary>用指定的进程启动方式运行一次 <c>程序 help</c>，30 秒内正常退出就算能运行。</summary>
+    /// <param name="runner">启动程序的方式（测试里换成假的）。</param>
+    /// <param name="path">要试运行的程序。</param>
+    /// <param name="cancellationToken">取消试运行；取消时照常抛 <see cref="OperationCanceledException"/>。</param>
+    /// <returns>退出码为 0 时为 true；启动不了、超时（会结束进程）或退出码非 0 时为 false。</returns>
+    internal static async Task<bool> TryRunAsync(IProcessRunner runner, string path, CancellationToken cancellationToken)
     {
-        var start = new ProcessStartInfo(path) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
-        start.ArgumentList.Add("help");
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(30));
         try
         {
-            using var process = Process.Start(start);
-            if (process is null)
-            {
-                return false;
-            }
-
-            var output = process.StandardOutput.ReadToEndAsync(timeout.Token);
-            var error = process.StandardError.ReadToEndAsync(timeout.Token);
-            try
-            {
-                await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
-                await Task.WhenAll(output, error).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                process.Kill(entireProcessTree: true);
-                return false;
-            }
-
-            return process.ExitCode == 0;
+            var result = await runner.RunAsync(path, ["help"], TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+            return result.ExitCode == 0;
         }
-        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is ProcessStartException or TimeoutException)
         {
             return false;
         }
@@ -330,7 +419,7 @@ public sealed class NodeUpdater(
     /// <param name="maxBytes">允许的最大字节数。</param>
     /// <param name="cancellationToken">取消下载。</param>
     /// <returns>文件内容。</returns>
-    /// <exception cref="UpdateException">返回非成功状态码、文件太大或下载中断。</exception>
+    /// <exception cref="UpdateException">返回非成功状态码、文件太大、下载中断、卡住或超时。</exception>
     private async Task<byte[]> DownloadAsync(Uri url, long maxBytes, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
@@ -340,32 +429,69 @@ public sealed class NodeUpdater(
             throw new UpdateException($"下载 {url.Segments[^1]} 失败：返回 {(int)response.StatusCode}");
         }
 
+        return await ReadBodyAsync(response, url.Segments[^1], maxBytes, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 读完响应内容。超过 <paramref name="maxBytes"/> 就放弃；<see cref="StallTimeout"/> 内没收到任何数据、
+    /// 或者总共超过 <see cref="BodyDeadline"/> 也放弃，不会因为连接半断开一直卡住。
+    /// </summary>
+    /// <param name="response">已经收到响应头的成功响应。</param>
+    /// <param name="name">给用户看的名字，例如文件名。</param>
+    /// <param name="maxBytes">允许的最大字节数。</param>
+    /// <param name="cancellationToken">取消读取；取消时照常抛 <see cref="OperationCanceledException"/>。</param>
+    /// <returns>响应内容。</returns>
+    /// <exception cref="UpdateException">内容太大、读的时候连接出错、卡住或超时。</exception>
+    private async Task<byte[]> ReadBodyAsync(HttpResponseMessage response, string name, long maxBytes, CancellationToken cancellationToken)
+    {
         if (response.Content.Headers.ContentLength > maxBytes)
         {
-            throw new UpdateException($"{url.Segments[^1]} 太大了，不下载");
+            throw new UpdateException($"{name} 太大了，不下载");
         }
 
+        var started = Stopwatch.GetTimestamp();
+        var deadlineArmed = BodyDeadline <= StallTimeout;
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         try
         {
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            timeout.CancelAfter(deadlineArmed ? BodyDeadline : StallTimeout);
+            await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
             using var buffer = new MemoryStream();
             var chunk = new byte[81920];
-            int read;
-            while ((read = await stream.ReadAsync(chunk, cancellationToken).ConfigureAwait(false)) > 0)
+            while (true)
             {
+                // 每读一次重新计时：等的是"下一块数据"，同时不超过总时限。记下这次是哪个时限先到，出错时说对原因。
+                var remaining = BodyDeadline - Stopwatch.GetElapsedTime(started);
+                deadlineArmed = remaining <= StallTimeout;
+                if (remaining <= TimeSpan.Zero)
+                {
+                    throw new OperationCanceledException(timeout.Token);
+                }
+
+                timeout.CancelAfter(deadlineArmed ? remaining : StallTimeout);
+                var read = await stream.ReadAsync(chunk, timeout.Token).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    return buffer.ToArray();
+                }
+
                 if (buffer.Length + read > maxBytes)
                 {
-                    throw new UpdateException($"{url.Segments[^1]} 太大了，不下载");
+                    throw new UpdateException($"{name} 太大了，不下载");
                 }
 
                 buffer.Write(chunk, 0, read);
             }
-
-            return buffer.ToArray();
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new UpdateException(deadlineArmed
+                ? $"下载 {name} 超过 {BodyDeadline.TotalMinutes:0} 分钟还没下完，放弃了"
+                : $"下载 {name} 卡住了：{StallTimeout.TotalSeconds:0} 秒没有收到数据，请检查网络后重试");
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException && !cancellationToken.IsCancellationRequested)
         {
-            throw new UpdateException($"下载 {url.Segments[^1]} 中断了：{ex.Message}");
+            throw new UpdateException($"下载 {name} 中断了：{ex.Message}", ex);
         }
     }
 
@@ -441,31 +567,53 @@ public sealed class NodeUpdater(
     /// <summary>用解出来的新程序换掉旧程序。</summary>
     /// <param name="staged">解出来、试运行过的新程序。</param>
     /// <param name="target">正在用的程序；Windows 上它被改名成 <c>.old</c>（或 <c>.old1</c>…<c>.old9</c>），换不上时改回去。</param>
-    /// <exception cref="UpdateException">Windows 上旁边的 <c>.old</c> 旧程序已经有 10 个，没有可用的备份名。</exception>
-    private static void Replace(string staged, string target)
+    /// <param name="windows">按 Windows 的方式替换（不能覆盖正在运行的程序，先给旧程序改名）。</param>
+    /// <param name="move">改名 / 移动文件：源路径、目标路径、是否覆盖（测试里换成会失败的）。</param>
+    /// <returns>Windows 上旧程序改名后的路径；其他系统为 null。</returns>
+    /// <exception cref="UpdateException">
+    /// Windows 上旁边的 <c>.old</c> 旧程序已经有 10 个，没有可用的备份名；
+    /// 或者换上新程序失败、把旧程序改回去也失败（消息里有两次失败的原因和旧程序现在的位置，原始异常在 <see cref="Exception.InnerException"/>）。
+    /// </exception>
+    /// <exception cref="IOException">换上新程序失败，旧程序已经改回原来的名字。</exception>
+    /// <exception cref="UnauthorizedAccessException">没有权限改名，旧程序没有被改动（或已经改回原来的名字）。</exception>
+    internal static string? Replace(string staged, string target, bool windows, Action<string, string, bool> move)
     {
-        if (!OperatingSystem.IsWindows())
+        ArgumentNullException.ThrowIfNull(move);
+        if (!windows)
         {
             // 改名覆盖是原子的；正在运行的旧进程还用着旧文件，不受影响。
-            File.Move(staged, target, overwrite: true);
-            return;
+            move(staged, target, true);
+            return null;
         }
 
         // Windows 不能覆盖正在运行的程序，但可以给它改名。
         CleanUpOldBinaries(target);
-        var backup = Enumerable.Range(0, 10).Select(i => target + ".old" + (i == 0 ? "" : i.ToString(CultureInfo.InvariantCulture)))
-            .FirstOrDefault(p => !File.Exists(p))
+        var backup = BackupPaths(target).FirstOrDefault(p => !File.Exists(p))
             ?? throw new UpdateException($"{target} 旁边的旧程序太多了，删掉 {Path.GetFileName(target)}.old* 再试");
-        File.Move(target, backup);
+        move(target, backup, false);
         try
         {
-            File.Move(staged, target);
+            move(staged, target, false);
         }
-        catch
+        catch (Exception error)
         {
-            File.Move(backup, target);
+            try
+            {
+                move(backup, target, false);
+            }
+            catch (Exception rollback) when (rollback is IOException or UnauthorizedAccessException)
+            {
+                // 改不回去时不能让第二个错误盖掉第一个，也要告诉用户旧程序在哪：现在 target 位置上什么都没有。
+                throw new UpdateException(
+                    $"换上新程序失败（{error.Message}），把旧程序改回原来的名字也失败了（{rollback.Message}）。"
+                    + $"旧程序现在是 {backup}，请手动把它改名回 {Path.GetFileName(target)}，否则节点启动不了",
+                    error);
+            }
+
             throw;
         }
+
+        return backup;
     }
 
     /// <summary>尽力删除文件；文件被占用（例如 Windows 上正在运行的旧程序）或没有权限时忽略。</summary>

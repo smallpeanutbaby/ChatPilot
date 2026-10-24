@@ -170,7 +170,7 @@ public static class NodeCli
 
     /// <summary>
     /// <c>run</c>：组装 herdr 客户端、任务跟踪、盯着 agent 的 watcher、附件下载和指令执行，然后连上服务器一直运行，
-    /// 直到收到 SIGINT / SIGTERM、被另一个实例替换或设备令牌被拒绝。启动时顺便清掉升级留下的旧程序。
+    /// 直到收到 SIGINT / SIGTERM、被另一个实例替换或设备令牌被拒绝。Windows 上启动时顺便清掉升级留下的旧程序。
     /// </summary>
     /// <param name="cli">解析好的命令行。</param>
     /// <param name="configPath">配置文件路径；任务记录、排队指令和附件都存在它旁边。</param>
@@ -188,7 +188,7 @@ public static class NodeCli
         var config = NodeConfigStore.Load(configPath);
         using var loggerFactory = CreateLoggerFactory();
         var logger = loggerFactory.CreateLogger("ChatPilot.Node");
-        if (Environment.ProcessPath is { } self)
+        if (OperatingSystem.IsWindows() && Environment.ProcessPath is { } self)
         {
             NodeUpdater.CleanUpOldBinaries(self);
         }
