@@ -32,7 +32,7 @@ Telegram ──(HTTPS)──────►├ 服务器 ◄──(TLS + 指纹)
 | S-03 | 配对码：8 位、约 40 bit 随机、10 分钟过期、只能用一次，最多同时 5 个 | `PairingService` | `Code_is_single_use…`、`Codes_expire` |
 | S-04 | 配对接口每 IP 每分钟 5 次；WebSocket 令牌错误每 IP 每分钟 10 次（只统计失败，正常重连不受影响），WebSocket 总请求每 IP 每分钟 60 次 | `ServerApp`、`AuthFailureLimiter` | `Pairing_is_rate_limited_per_ip`、`Repeated_bad_tokens_are_throttled…` |
 | S-05 | 设备令牌 256 bit 随机数，服务器只存 SHA-256，比较用定长时间算法 | `StateStore.FindDeviceByToken` | `State_file_never_contains_plaintext_tokens…` |
-| S-21 | Telegram 通道只处理配置的 `OwnerUserId` 在**私聊**里发的消息；陌生人的消息不处理不回复，日志里只记对方的用户 ID（方便第一次配置），不记内容。bot token 是 API 地址的一部分，所以这个通道出的错误一律不带地址、不打印异常对象。停机、代理不通期间积压的消息，晚到超过 10 分钟的不执行、只告诉主人（微信消息带发送时间时也一样），迟到的 `/yes` 不会同意后来才出现的确认框 | `TelegramChannel.IsFromOwner`、`TelegramClient.CallAsync`、`StaleCommands` | `Only_the_owner_is_answered_and_the_offset_is_saved`、`Messages_that_arrive_too_late_are_reported_instead_of_run` |
+| S-21 | Telegram 通道只处理配置的 `OwnerUserId` 在**私聊**里发的消息；陌生人的消息不处理不回复，日志里只记对方的用户 ID（方便第一次配置），不记内容。bot token 是 API 地址的一部分，所以这个通道出的错误一律不带地址；Telegram 通道和通知器（`Notifier`）的日志只记异常的类型和说明，不打印异常对象（里面套着的异常可能带着地址）；访问 Telegram 不用会记录请求地址的 `IHttpClientFactory`。停机、代理不通期间积压的消息，晚到超过 10 分钟的不执行、只告诉主人（微信消息带发送时间时也一样），迟到的 `/yes` 不会同意后来才出现的确认框 | `TelegramChannel.IsFromOwner`、`TelegramClient.CallAsync`、`Notifier.SendAsync`、`StaleCommands` | `Only_the_owner_is_answered_and_the_offset_is_saved`、`Failed_notifications_log_only_the_error_type_and_message`、`Messages_that_arrive_too_late_are_reported_instead_of_run` |
 | — | 撤销立即生效：`/unpair` 即使写盘失败也先在内存里删除并断开；握手期间被撤销的设备在登记后会被踢掉；已撤销设备的事件不再转发 | `ChatDispatcher.UnpairAsync`、`DeviceHub` | `Unpair_takes_effect_even_when_saving_fails` |
 
 ### 3.2 传输

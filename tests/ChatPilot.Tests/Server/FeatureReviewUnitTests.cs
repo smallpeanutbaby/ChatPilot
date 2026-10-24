@@ -1,5 +1,10 @@
+using System.Collections.Concurrent;
 using ChatPilot.Server.Chat;
+using ChatPilot.Server.Telegram;
 using ChatPilot.Shared.Protocol;
+using ChatPilot.Tests.Support;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 
 namespace ChatPilot.Tests.Server;
@@ -69,6 +74,53 @@ public class FeatureReviewUnitTests
     }
 
     [Fact]
+    public async Task A_hanging_channel_neither_delays_nor_overflows_the_other_one()
+    {
+        // 审查 #8：一个通道卡住，另一个通道的通知照常、一条不少地发出。
+        var registry = new ChatChannelRegistry();
+        var stuck = new TestChannel("Telegram") { Hang = true };
+        var healthy = new TestChannel("微信");
+        registry.Register(stuck);
+        registry.Register(healthy);
+        using var notifier = new Notifier(registry, NullLogger<Notifier>.Instance);
+
+        for (var i = 0; i < 150; i++)
+        {
+            notifier.Enqueue($"通知 {i}");
+        }
+
+        await DevChat.EventuallyAsync(() => Task.FromResult(healthy.Received.Count == 150), "正常的通道应该收到全部 150 条");
+        Assert.Equal(Enumerable.Range(0, 150).Select(i => $"通知 {i}"), healthy.Received);
+        Assert.Single(stuck.Received);
+    }
+
+    [Fact]
+    public async Task Failed_notifications_log_only_the_error_type_and_message()
+    {
+        // 审查 #9：Telegram 的异常里套着的异常可能带着含 bot token 的地址，日志里不能有（S-21）。
+        var logs = new CapturingLoggerProvider();
+        using var factory = new LoggerFactory([logs]);
+        var registry = new ChatChannelRegistry();
+        var failing = new TestChannel("Telegram")
+        {
+            Error = new TelegramException(
+                "sendMessage 请求失败（ConnectionError）",
+                inner: new HttpRequestException("https://api.telegram.org/bot123456:SECRET-TOKEN/sendMessage")),
+        };
+        registry.Register(failing);
+        using var notifier = new Notifier(registry, factory.CreateLogger<Notifier>());
+
+        await notifier.BroadcastAsync("✅ 做完了", CancellationToken.None);
+        notifier.Enqueue("✅ 又做完了");
+        await DevChat.EventuallyAsync(() => Task.FromResult(failing.Received.Count == 2), "两条都应该尝试发送");
+        await DevChat.EventuallyAsync(() => Task.FromResult(logs.Lines.Count(l => l.Contains("发送通知失败", StringComparison.Ordinal)) == 2), "两次失败都应该记日志");
+
+        Assert.Contains("TelegramException sendMessage 请求失败（ConnectionError）", logs.AllText, StringComparison.Ordinal);
+        Assert.DoesNotContain("SECRET-TOKEN", logs.AllText, StringComparison.Ordinal);
+        Assert.DoesNotContain("api.telegram.org", logs.AllText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Blocked_agents_learned_from_command_results_are_candidates()
     {
         var time = new FakeTimeProvider();
@@ -81,5 +133,33 @@ public class FeatureReviewUnitTests
         state.NoteBlocked(AgentRef.From("d1", "mac", Api));
         time.Advance(TimeSpan.FromHours(7));
         Assert.Empty(state.Blocked());
+    }
+
+    /// <summary>测试用的聊天通道：记下收到的通知；可以让它一直卡住，或者每次都抛出指定的异常。</summary>
+    private sealed class TestChannel(string name) : IChatChannel
+    {
+        public ConcurrentQueue<string> Received { get; } = new();
+
+        public bool Hang { get; init; }
+
+        public Exception? Error { get; init; }
+
+        public string Name => name;
+
+        public bool IsReady => true;
+
+        public async Task SendToOwnerAsync(string text, CancellationToken cancellationToken)
+        {
+            Received.Enqueue(text);
+            if (Hang)
+            {
+                await Task.Delay(Timeout.Infinite, cancellationToken);
+            }
+
+            if (Error is not null)
+            {
+                throw Error;
+            }
+        }
     }
 }

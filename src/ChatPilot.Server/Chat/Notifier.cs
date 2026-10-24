@@ -52,43 +52,74 @@ public sealed class ChatChannelRegistry
 
 /// <summary>
 /// 把主动通知（agent 做完、卡住）发到所有可用的通道。
-/// 设备事件经 <see cref="Enqueue"/> 进入一个有界队列，由单个后台任务按顺序发送，不阻塞设备的接收循环。
+/// 设备事件经 <see cref="Enqueue"/> 进入每个通道各自的有界队列，每个通道一个后台任务按顺序发送，不阻塞设备的接收循环；
+/// 一个通道卡住（例如没配代理时连不上 Telegram）只会让它自己的队列排满，不耽误、也不挤掉另一个通道的通知。
 /// </summary>
+/// <remarks>
+/// 发送失败的日志里只记异常的类型和说明，不记异常对象：Telegram 的异常里可能带着含 bot token 的请求地址（见 docs/SECURITY.md S-21）。
+/// </remarks>
 public sealed class Notifier : IDisposable
 {
-    /// <summary>最多排队多少条还没发出的通知；通道一直发不出去时，超出的直接丢弃，不会无限占内存。</summary>
+    /// <summary>每个通道最多排队多少条还没发出的通知；通道一直发不出去时，超出的直接丢弃，不会无限占内存。</summary>
     private const int QueueCapacity = 100;
 
-    private readonly ChatChannelRegistry _registry;
-    private readonly ILogger<Notifier> _logger;
-    /// <summary>等待发送的通知。只有一个后台任务在读，保证通知按产生的顺序到达。</summary>
-    private readonly Channel<string> _queue = Channel.CreateBounded<string>(
-        new BoundedChannelOptions(QueueCapacity) { FullMode = BoundedChannelFullMode.Wait, SingleReader = true });
+    /// <summary>一条通知最多发多久；超过时放弃这条，接着发后面的。</summary>
+    private static readonly TimeSpan SendTimeout = TimeSpan.FromMinutes(2);
 
-    /// <summary>创建通知器，并启动按顺序发送队列的后台任务。</summary>
+    /// <summary>已登记的聊天通道。</summary>
+    private readonly ChatChannelRegistry _registry;
+    /// <summary>日志。</summary>
+    private readonly ILogger<Notifier> _logger;
+    /// <summary>保护 <c>_queues</c> 和 <c>_disposed</c>：通知随时在排队，<see cref="Dispose"/> 可能同时发生。</summary>
+    private readonly Lock _lock = new();
+    /// <summary>每个通道等待发送的通知，按通道对象区分；第一次给这个通道排队时创建，同时启动它的发送任务。</summary>
+    private readonly Dictionary<IChatChannel, Channel<string>> _queues = new(ReferenceEqualityComparer.Instance);
+    /// <summary>是否已经 <see cref="Dispose"/>，之后不再接收新通知。</summary>
+    private bool _disposed;
+
+    /// <summary>创建通知器。各通道的发送任务在第一次给它排队时启动。</summary>
     /// <param name="registry">已登记的聊天通道。</param>
     /// <param name="logger">日志。</param>
     public Notifier(ChatChannelRegistry registry, ILogger<Notifier> logger)
     {
         _registry = registry;
         _logger = logger;
-        _ = Task.Run(DrainAsync);
     }
 
-    /// <summary>排队发送一条通知；队列满时丢弃并记日志。</summary>
+    /// <summary>给每个已登记的通道排队发送一条通知；某个通道的队列满时只丢弃那个通道的这条，并记日志。</summary>
     /// <param name="text">通知内容。</param>
     public void Enqueue(string text)
     {
-        if (!_queue.Writer.TryWrite(text))
+        var channels = _registry.Snapshot();
+        if (!channels.Any(c => c.IsReady))
         {
-            _logger.LogWarning("通知队列已满 {Capacity} 条，丢弃一条通知", QueueCapacity);
+            _logger.LogWarning("没有可用的聊天通道，通知没有发出");
+            return;
+        }
+
+        foreach (var channel in channels)
+        {
+            if (QueueFor(channel) is { } queue && !queue.Writer.TryWrite(text))
+            {
+                _logger.LogWarning("{Channel} 的通知队列已满 {Capacity} 条，丢弃一条通知", channel.Name, QueueCapacity);
+            }
         }
     }
 
-    /// <summary>停止接收新通知，后台任务发完队列里的通知后退出。</summary>
-    public void Dispose() => _queue.Writer.TryComplete();
+    /// <summary>停止接收新通知，各通道的发送任务发完队列里的通知后退出。</summary>
+    public void Dispose()
+    {
+        lock (_lock)
+        {
+            _disposed = true;
+            foreach (var queue in _queues.Values)
+            {
+                queue.Writer.TryComplete();
+            }
+        }
+    }
 
-    /// <summary>立即发到所有可用通道。单个通道失败只记日志，不影响其他通道。</summary>
+    /// <summary>立即发到所有可用通道（各通道同时发）。单个通道失败只记日志，不影响其他通道。</summary>
     /// <param name="text">通知内容。</param>
     /// <param name="cancellationToken">取消发送；取消不会被吞掉，会抛给调用方。</param>
     /// <returns>所有通道都尝试发过之后完成的任务；没有可用通道时只记日志。</returns>
@@ -101,33 +132,72 @@ public sealed class Notifier : IDisposable
             return;
         }
 
-        foreach (var channel in channels)
+        await Task.WhenAll(channels.Select(c => SendAsync(c, text, cancellationToken))).ConfigureAwait(false);
+    }
+
+    /// <summary>这个通道的通知队列；还没有时创建，并启动它的发送任务。</summary>
+    /// <param name="channel">聊天通道。</param>
+    /// <returns>通道的队列；已经 <see cref="Dispose"/> 时为 null。</returns>
+    private Channel<string>? QueueFor(IChatChannel channel)
+    {
+        lock (_lock)
         {
-            try
+            if (_disposed)
             {
-                await channel.SendToOwnerAsync(text, cancellationToken).ConfigureAwait(false);
+                return null;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+
+            if (!_queues.TryGetValue(channel, out var queue))
             {
-                _logger.LogWarning(ex, "通过 {Channel} 发送通知失败", channel.Name);
+                queue = Channel.CreateBounded<string>(new BoundedChannelOptions(QueueCapacity) { FullMode = BoundedChannelFullMode.Wait, SingleReader = true });
+                _queues[channel] = queue;
+                _ = Task.Run(() => DrainAsync(channel, queue));
+            }
+
+            return queue;
+        }
+    }
+
+    /// <summary>一个通道的发送任务：按顺序取出它队列里的通知逐条发送（通道没就绪时跳过），直到 <see cref="Dispose"/> 后队列发完。</summary>
+    /// <param name="channel">聊天通道。</param>
+    /// <param name="queue">它的通知队列。</param>
+    /// <returns>队列关闭并发完后完成的任务。</returns>
+    private async Task DrainAsync(IChatChannel channel, Channel<string> queue)
+    {
+        await foreach (var text in queue.Reader.ReadAllAsync().ConfigureAwait(false))
+        {
+            if (channel.IsReady)
+            {
+                await SendAsync(channel, text, CancellationToken.None).ConfigureAwait(false);
             }
         }
     }
 
-    /// <summary>后台任务：按顺序取出队列里的通知逐条广播，直到 <see cref="Dispose"/> 后队列发完。</summary>
-    /// <returns>队列关闭并发完后完成的任务。</returns>
-    private async Task DrainAsync()
+    /// <summary>通过一个通道发一条通知，最多等 <see cref="SendTimeout"/>。失败只记异常的类型和说明。</summary>
+    /// <param name="channel">聊天通道。</param>
+    /// <param name="text">通知内容。</param>
+    /// <param name="cancellationToken">取消发送；取消时抛出 <see cref="OperationCanceledException"/>。</param>
+    /// <returns>发出、失败或超时之后完成的任务。</returns>
+    private async Task SendAsync(IChatChannel channel, string text, CancellationToken cancellationToken)
     {
-        await foreach (var text in _queue.Reader.ReadAllAsync().ConfigureAwait(false))
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(SendTimeout);
+        try
         {
-            try
-            {
-                await BroadcastAsync(text, CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "发送通知失败");
-            }
+            await channel.SendToOwnerAsync(text, deadline.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested)
+        {
+            _logger.LogWarning("通过 {Channel} 发送通知超过 {Minutes} 分钟没有完成，放弃这条", channel.Name, SendTimeout.TotalMinutes);
+        }
+        catch (Exception ex)
+        {
+            // 不记异常对象：Telegram 的异常（包括里面套着的异常）可能带着含 bot token 的请求地址。
+            _logger.LogWarning("通过 {Channel} 发送通知失败：{Type} {Message}", channel.Name, ex.GetType().Name, ex.Message);
         }
     }
 }
