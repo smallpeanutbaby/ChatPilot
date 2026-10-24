@@ -74,8 +74,19 @@ public sealed class ChatDispatcher(
     /// <summary>发过确认提示、等主人确认的 <c>/close</c>。</summary>
     /// <param name="DeviceId">agent 所在设备的 ID。</param>
     /// <param name="PaneId">agent 所在的 pane。</param>
+    /// <param name="Label">回复里显示的名字，例如 <c>[mac] tideq</c>。</param>
+    /// <param name="Address">确认时要写的目标，例如 <c>mac/tideq</c>。</param>
     /// <param name="Expires">确认的截止时间。</param>
-    private sealed record PendingClose(string DeviceId, string PaneId, DateTimeOffset Expires);
+    private sealed record PendingClose(string DeviceId, string PaneId, string Label, string Address, DateTimeOffset Expires);
+
+    /// <summary>
+    /// 有 <c>/close</c> 在等确认时，单独发来会被当成"确认"的词（去掉首尾空白和句末标点，不区分大小写）。
+    /// 这些词不交给管家：管家可能把它当成同意了它自己之前提的什么事。
+    /// </summary>
+    private static readonly HashSet<string> BareConfirmWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "确认", "确认关闭", "确定", "关闭", "关掉", "是", "是的", "对", "好", "好的", "可以", "嗯", "ok", "okay", "yes", "y", "confirm",
+    };
 
     /// <summary>解析好的目标：在线设备上的一个 agent。</summary>
     /// <param name="Device">agent 所在的设备。</param>
@@ -153,6 +164,11 @@ public sealed class ChatDispatcher(
     private async Task<string> HandleCoreAsync(string text, bool scheduled, CancellationToken cancellationToken)
     {
         var command = ChatCommandParser.Parse(text);
+        if (!scheduled && CloseReminder(command) is { } reminder)
+        {
+            return reminder;
+        }
+
         try
         {
             return command switch
@@ -199,6 +215,31 @@ public sealed class ChatDispatcher(
             logger.LogError(ex, "处理指令 {Command} 时出错", command.GetType().Name);
             return "❌ 服务器内部错误，详情见服务器日志";
         }
+    }
+
+    /// <summary>
+    /// 有 <c>/close</c> 在等确认时，主人单独回了"确认""好的"之类的词，或者发了不写目标的 <c>/yes</c>、<c>/no</c>：
+    /// 多半是在回答"要关闭吗？"。这时不交给管家、也不去猜是哪个确认框，只告诉主人确认关闭的完整写法。
+    /// </summary>
+    /// <param name="command">解析好的指令。</param>
+    /// <returns>提醒的文字；没有在等确认的 <c>/close</c>、已经过期，或者不是这几种消息时为 null。</returns>
+    private string? CloseReminder(ChatCommand command)
+    {
+        if (_pendingClose is not { } pending || pending.Expires <= clock.UtcNow)
+        {
+            return null;
+        }
+
+        var howToClose = $"确认关闭请回复：/close {pending.Address} 确认";
+        return command switch
+        {
+            ChatButlerPrompt butler when BareConfirmWords.Contains(butler.Text.Trim().TrimEnd('。', '！', '!', '.', '~', '～')) =>
+                $"⚠️ 还没有关闭 {pending.Label}。{howToClose}\n（这条消息没有交给管家；要和管家说话，请换个说法再发一次）",
+            ChatRespond { Target: null } respond =>
+                $"⚠️ 你刚才要关闭 {pending.Label}，这条 /{(respond.Approve ? "yes" : "no")} 没有按任何键。{howToClose}\n" +
+                $"要回应确认框的话请写上目标：/{(respond.Approve ? "yes" : "no")} 设备/名字",
+            _ => null,
+        };
     }
 
     /// <summary><c>/devices</c>：在线状态、当前默认设备，在线的显示电脑名、系统和节点版本，离线的显示最后在线时间。</summary>
@@ -504,16 +545,37 @@ public sealed class ChatDispatcher(
         return resolved is null ? "❓ " + error : await SendPromptAsync(resolved, text, withImages: true, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>把任务发给解析好的 agent，见 <see cref="SendTextAsync"/>。</summary>
+    /// <summary>
+    /// 把任务发给解析好的 agent，见 <see cref="SendTextAsync"/>。交出去（或排上队）了就记为主人派的活；
+    /// 节点说它在等确认时记下来，紧接着的 <c>/yes</c> 就是回应它。
+    /// </summary>
     /// <param name="resolved">目标 agent。</param>
     /// <param name="text">任务内容。</param>
     /// <param name="withImages">要不要带上暂存的图片。</param>
     /// <param name="cancellationToken">取消等待。</param>
     /// <returns>发送结果。</returns>
-    private Task<string> SendPromptAsync(Resolved resolved, string text, bool withImages, CancellationToken cancellationToken) =>
-        SendTextAsync(resolved.Device, resolved.Target, text, withImages, resolved.Label, $"已发给 {resolved.Label}", notFound: null, cancellationToken);
+    private async Task<string> SendPromptAsync(Resolved resolved, string text, bool withImages, CancellationToken cancellationToken)
+    {
+        CommandOutcome? outcome = null;
+        var reply = await SendTextAsync(
+            resolved.Device, resolved.Target, text, withImages, resolved.Label, $"已发给 {resolved.Label}", notFound: null,
+            o => outcome = o, cancellationToken).ConfigureAwait(false);
+        if (outcome is { Ok: true })
+        {
+            conversation.Dispatched(resolved.Device.Id, resolved.Agent.PaneId, resolved.Agent.Name);
+        }
+        else if (outcome?.Error?.Code == ErrorCodes.AgentBlocked)
+        {
+            conversation.NoteBlocked(AgentRef.From(resolved.Device.Id, resolved.Device.Name, resolved.Agent));
+        }
 
-    /// <summary>不带 <c>/</c> 或 <c>@</c> 的文字：交给默认设备上名为 <see cref="ButlerName"/> 的管家。</summary>
+        return reply;
+    }
+
+    /// <summary>
+    /// 不带 <c>/</c> 或 <c>@</c> 的文字：交给默认设备上名为 <see cref="ButlerName"/> 的管家。交出去了就记为主人派的活；
+    /// 管家在等确认时把它记为最近打过交道的、在等确认的，紧接着的 <c>/yes</c> 就是回应它。
+    /// </summary>
     /// <param name="text">原文。</param>
     /// <param name="withImages">要不要带上暂存的图片（定时任务不带）。</param>
     /// <param name="cancellationToken">取消等待。</param>
@@ -527,10 +589,24 @@ public sealed class ChatDispatcher(
         }
 
         var label = $"[{device.Name}] 的管家";
-        return await SendTextAsync(
+        CommandOutcome? outcome = null;
+        var reply = await SendTextAsync(
             device, ButlerName, text, withImages, label, $"已交给 {label}",
             notFound: $"🤖 [{device.Name}] 还没有管家。发 /butler 创建一个，或者用 @目标 内容 直接指定 agent（/ls 查看）。",
-            cancellationToken).ConfigureAwait(false);
+            o => outcome = o, cancellationToken).ConfigureAwait(false);
+        if (outcome is { Ok: true })
+        {
+            conversation.Dispatched(device.Id, paneId: null, ButlerName);
+        }
+        else if (outcome?.Error?.Code == ErrorCodes.AgentBlocked
+            && (await FindAsync(new TargetRef(device.Name, ButlerName), cancellationToken).ConfigureAwait(false)).Resolved is { } butler)
+        {
+            var agent = AgentRef.From(butler.Device.Id, butler.Device.Name, butler.Agent);
+            conversation.Touch(agent);
+            conversation.NoteBlocked(agent);
+        }
+
+        return reply;
     }
 
     /// <summary>
@@ -544,14 +620,17 @@ public sealed class ChatDispatcher(
     /// <param name="label">回复里的名字。</param>
     /// <param name="sentPhrase">直接交出去时的说法，例如"已发给 [mac] tideq"。</param>
     /// <param name="notFound">找不到目标时的回复；为 null 时用节点的说明。</param>
+    /// <param name="observe">拿到节点的结果后调用，让调用方据此更新对话上下文；为 null 时不调用。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>回复主人的文字：已发出、节点的说明（例如排队了），或失败原因（带图片时提醒图片还暂存着）。</returns>
     private async Task<string> SendTextAsync(
-        DeviceRecord device, string target, string text, bool withImages, string label, string sentPhrase, string? notFound, CancellationToken cancellationToken)
+        DeviceRecord device, string target, string text, bool withImages, string label, string sentPhrase, string? notFound,
+        Action<CommandOutcome>? observe, CancellationToken cancellationToken)
     {
         var attachments = withImages ? media.Issue(device.Id) : null;
         NodeCommand command = attachments is null ? new PromptCommand(target, text) : new MediaPromptCommand(target, text, attachments);
         var outcome = await hub.SendAsync(device.Id, command, CommandTimeout, cancellationToken).ConfigureAwait(false);
+        observe?.Invoke(outcome);
         if (!outcome.Ok)
         {
             var failure = notFound is not null && outcome.Error?.Code == ErrorCodes.NotFound ? notFound : ReplyFormatter.Failure(outcome);
@@ -601,7 +680,10 @@ public sealed class ChatDispatcher(
             .ConfigureAwait(false);
     }
 
-    /// <summary>让节点启动 agent（超时用 <see cref="ServerOptions.StartAgentTimeoutSeconds"/>），成功后记为最近打过交道的 agent。</summary>
+    /// <summary>
+    /// 让节点启动 agent（超时用 <see cref="ServerOptions.StartAgentTimeoutSeconds"/>），成功后记为最近打过交道的 agent；
+    /// 卡在确认框时记为在等确认，带初始说明时（管家）记为主人派的活。
+    /// </summary>
     /// <param name="device">在哪台设备上启动。</param>
     /// <param name="command">启动参数。</param>
     /// <param name="cancellationToken">取消等待。</param>
@@ -616,7 +698,18 @@ public sealed class ChatDispatcher(
         }
 
         var agent = started.Agent;
-        conversation.Touch(AgentRef.From(device.Id, device.Name, agent));
+        var agentRef = AgentRef.From(device.Id, device.Name, agent);
+        conversation.Touch(agentRef);
+        if (!started.Ready)
+        {
+            conversation.NoteBlocked(agentRef);
+        }
+
+        if (command.InitialPrompt is not null)
+        {
+            conversation.Dispatched(device.Id, agent.PaneId, agent.Name);
+        }
+
         var target = $"{device.Name}/{agent.Name ?? agent.PaneId}";
         var header = $"🚀 已在 [{device.Name}] 启动 {agent.DisplayName}（{agent.Kind ?? "?"}）\n目录：{agent.Cwd}";
         return started.Ready
@@ -624,8 +717,11 @@ public sealed class ChatDispatcher(
             : $"{header}\n\n⚠️ 它在等你确认：\n\n{started.Screen}\n\n回复 /yes {target} 同意，/no {target} 拒绝";
     }
 
-    /// <summary><c>/yes</c>、<c>/no</c>：回应确认框，成功后不再把它记为在等确认。</summary>
-    /// <param name="command">解析好的指令；没写目标时优先用在等确认的 agent。</param>
+    /// <summary>
+    /// <c>/yes</c>、<c>/no</c>：回应确认框，成功后不再把它记为在等确认。同意之后节点会接着跟踪到它做完，
+    /// 所以记为主人派的活；节点说确认框变了、要再看一眼时仍然记为在等确认。
+    /// </summary>
+    /// <param name="command">解析好的指令；没写目标时的选法见 <see cref="PickBlockedAsync"/>。</param>
     /// <param name="cancellationToken">取消等待。</param>
     /// <returns>节点的说明；找不到目标或节点返回失败时是原因。</returns>
     private async Task<string> RespondAsync(ChatRespond command, CancellationToken cancellationToken)
@@ -641,7 +737,17 @@ public sealed class ChatDispatcher(
         if (outcome is { Ok: true, Data: AckData ack })
         {
             conversation.Responded(resolved.Device.Id, resolved.Agent.PaneId);
+            if (command.Approve)
+            {
+                conversation.Dispatched(resolved.Device.Id, resolved.Agent.PaneId, resolved.Agent.Name);
+            }
+
             return $"👌 {resolved.Label}：{ack.Message}";
+        }
+
+        if (outcome.Error?.Code == ErrorCodes.AgentBlocked)
+        {
+            conversation.NoteBlocked(AgentRef.From(resolved.Device.Id, resolved.Device.Name, resolved.Agent));
         }
 
         return ReplyFormatter.Failure(outcome);
@@ -767,7 +873,7 @@ public sealed class ChatDispatcher(
             return ReplyFormatter.Failure(outcome);
         }
 
-        _pendingClose = new PendingClose(resolved.Device.Id, resolved.Agent.PaneId, now + CloseConfirmWindow);
+        _pendingClose = new PendingClose(resolved.Device.Id, resolved.Agent.PaneId, resolved.Label, resolved.Address, now + CloseConfirmWindow);
         var agent = resolved.Agent;
         var expired = command.Confirmed ? "确认已经过期或者对不上，请重新确认。\n\n" : "";
         return $"""
@@ -1177,13 +1283,13 @@ public sealed class ChatDispatcher(
     }
 
     /// <summary>
-    /// 没写目标时用默认目标：<paramref name="preferBlocked"/> 为 true（<c>/yes</c>、<c>/no</c>）时先看在等确认的 agent，
-    /// 只有一个就用它、有多个就让主人指定；否则用最近打过交道的 agent。
+    /// 没写目标时用默认目标：<paramref name="preferBlocked"/> 为 true（<c>/yes</c>、<c>/no</c>）时先按 <see cref="PickBlockedAsync"/>
+    /// 找在等确认的 agent；否则（或者没有候选时）用最近打过交道的 agent。
     /// </summary>
     /// <param name="target">主人写的目标；为 null 时用默认目标。</param>
     /// <param name="cancellationToken">取消查询。</param>
     /// <param name="preferBlocked">没写目标时是否先找在等确认的 agent。</param>
-    /// <returns>找到的 agent；找不到时为 null，并给出原因。</returns>
+    /// <returns>找到的 agent；找不到、或者分不清是哪个在等确认时为 null，并给出原因。</returns>
     private async Task<(Resolved? Resolved, string? Error)> ResolveOrRecentAsync(TargetRef? target, CancellationToken cancellationToken, bool preferBlocked = false)
     {
         if (target is not null)
@@ -1193,16 +1299,16 @@ public sealed class ChatDispatcher(
 
         if (preferBlocked)
         {
-            var blocked = await StillBlockedAsync(cancellationToken).ConfigureAwait(false);
-            if (blocked.Count > 1)
+            var (blocked, error) = await PickBlockedAsync(cancellationToken).ConfigureAwait(false);
+            if (error is not null)
             {
-                return (null, "有好几个 agent 在等确认，请写上目标：" + string.Join("、", blocked.Select(b => b.Address)));
+                return (null, error);
             }
 
-            if (blocked.Count == 1)
+            if (blocked is not null)
             {
-                conversation.Touch(AgentRef.From(blocked[0].Device.Id, blocked[0].Device.Name, blocked[0].Agent));
-                return (blocked[0], null);
+                conversation.Touch(AgentRef.From(blocked.Device.Id, blocked.Device.Name, blocked.Agent));
+                return (blocked, null);
             }
         }
 
@@ -1212,24 +1318,43 @@ public sealed class ChatDispatcher(
     }
 
     /// <summary>
-    /// 发过"在等你确认"的 agent 里，现在确实还在等的（按 pane 对上，用它现在的名字）。已经不等了的（在电脑上处理掉了、
-    /// 用 /keys 处理了、关掉了）顺手从记录里划掉；所在设备离线或查询失败的不算候选，但先不划掉。
+    /// 不写目标的 <c>/yes</c>、<c>/no</c> 回应哪个确认框。向记着的候选（最近打过交道的 agent、记为在等确认的 agent）
+    /// 所在的设备要一次列表，按 pane 对上现在的状态：
+    /// <list type="number">
+    /// <item>最近打过交道的 agent 自己在等确认（名字也没变）：就是它，哪怕别的 agent 也在等。</item>
+    /// <item>有候选所在的设备离线或没有回应、又可能挑错时：不猜，让主人写上目标。</item>
+    /// <item>其余在等确认的只有一个就是它；有好几个让主人写上目标。</item>
+    /// </list>
+    /// 已经不等了的（在电脑上处理掉了、用 /keys 处理了、关掉了）顺手从记录里划掉；查不到的先不划掉。
     /// </summary>
     /// <param name="cancellationToken">取消查询。</param>
-    /// <returns>现在确实还在等确认的 agent，最近发通知的在前；没有时为空列表。</returns>
-    private async Task<IReadOnlyList<Resolved>> StillBlockedAsync(CancellationToken cancellationToken)
+    /// <returns>
+    /// 挑中的 agent（用它现在的名字）；没有在等确认的候选时两项都为 null（由调用方退回最近打过交道的 agent）；
+    /// 分不清时 agent 为 null，并给出让主人写目标的说明。
+    /// </returns>
+    private async Task<(Resolved? Blocked, string? Error)> PickBlockedAsync(CancellationToken cancellationToken)
     {
+        var recent = conversation.Recent;
         var remembered = conversation.Blocked();
-        if (remembered.Count == 0)
+        if (recent is null && remembered.Count == 0)
         {
-            return [];
+            return (null, null);
         }
 
-        var devices = remembered.Select(b => b.DeviceId).Distinct(StringComparer.Ordinal)
-            .Select(id => store.FindDevice(id)).OfType<DeviceRecord>().ToList();
-        var lists = (await QueryAgentsAsync(devices, cancellationToken).ConfigureAwait(false))
+        var deviceIds = remembered.Select(b => b.DeviceId).Append(recent?.DeviceId).OfType<string>().Distinct(StringComparer.Ordinal);
+        var results = await QueryAgentsAsync(deviceIds.Select(id => store.FindDevice(id)).OfType<DeviceRecord>(), cancellationToken).ConfigureAwait(false);
+        var lists = results
             .Where(r => r.Outcome is { Ok: true, Data: AgentListData })
             .ToDictionary(r => r.Device.Id, r => (r.Device, Agents: ((AgentListData)r.Outcome!.Data!).Agents), StringComparer.Ordinal);
+
+        if (recent is not null
+            && lists.TryGetValue(recent.DeviceId, out var recentList)
+            && recentList.Agents.FirstOrDefault(a => a.PaneId == recent.PaneId) is { Status: "blocked" } recentAgent
+            && (recent.Name is null || string.Equals(recent.Name, recentAgent.Name, StringComparison.OrdinalIgnoreCase)))
+        {
+            return (new Resolved(recentList.Device, recentAgent), null);
+        }
+
         var still = new List<Resolved>();
         foreach (var entry in remembered)
         {
@@ -1248,7 +1373,21 @@ public sealed class ChatDispatcher(
             }
         }
 
-        return still;
+        // 查不到的设备上可能有更该回应的确认框（包括最近打过交道的那个），这时挑哪个都可能挑错。
+        var unknown = results.Where(r => !lists.ContainsKey(r.Device.Id)).ToList();
+        if (unknown.Count > 0 && (still.Count > 0 || remembered.Any(b => unknown.Any(u => u.Device.Id == b.DeviceId))))
+        {
+            var reasons = string.Join("、", unknown.Select(u => $"{u.Device.Name}（{u.Outcome?.Error?.Message ?? "离线"}）"));
+            var known = still.Count > 0 ? "。能查到在等确认的：" + string.Join("、", still.Select(b => b.Address)) : "";
+            return (null, $"{reasons} 查不到 agent 的状态，分不清你要回应哪个确认框，请写上目标，例如 /yes 设备/名字{known}");
+        }
+
+        return still.Count switch
+        {
+            0 => (null, null),
+            1 => (still[0], null),
+            _ => (null, "有好几个 agent 在等确认，请写上目标：" + string.Join("、", still.Select(b => b.Address))),
+        };
     }
 
     /// <summary>

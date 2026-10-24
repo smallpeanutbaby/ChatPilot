@@ -65,6 +65,7 @@ public sealed class NewFeatureTests : IAsyncLifetime
         var herdr = new FakeHerdr { StatusAfterPrompt = "blocked", Screen = SampleScreens.PermissionDialog };
         herdr.AddAgent("tideq", "TideQ");
         herdr.AddAgent("api", "Api");
+        herdr.AddAgent("web", "Web");
         await using var node = await NodeHarness.PairAndStartAsync(_factory, "mac", herdr);
 
         await DevChat.SendAsync(_chat, "@tideq 删掉 build");
@@ -77,6 +78,9 @@ public sealed class NewFeatureTests : IAsyncLifetime
         await DevChat.WaitForEventAsync(_chat, e => e.StartsWith("⚠️ [mac] tideq", StringComparison.Ordinal));
         await DevChat.SendAsync(_chat, "@api 也删");
         await DevChat.WaitForEventAsync(_chat, e => e.StartsWith("⚠️ [mac] api", StringComparison.Ordinal));
+
+        // 最近打过交道的 agent 自己不在等确认时，分不清是哪个。（它自己在等时就是它，见 FeatureReviewTests。）
+        await DevChat.SendAsync(_chat, "/read web");
         var ambiguous = await DevChat.SendAsync(_chat, "/no");
         Assert.StartsWith("❓ 有好几个 agent 在等确认", ambiguous, StringComparison.Ordinal);
         Assert.Contains("mac/tideq", ambiguous, StringComparison.Ordinal);
