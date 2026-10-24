@@ -23,6 +23,8 @@ dotnet build ChatPilot.sln          # 警告视为错误；src 下公开成员�
 dotnet test ChatPilot.sln           # 单元测试 + 集成测试 + 安全测试
 ```
 
+提交 PR 后，GitHub Actions 会在 Linux、macOS、Windows 上各跑一遍测试，三项都通过才能合并。测试里涉及路径、文件权限、异常类型的地方，注意三个系统的差别（例如 Windows 上 `/tmp` 不是绝对路径）。
+
 - 改动节点的指令执行（`CommandExecutor`、`PathPolicy`、`HerdrClient`）时，记住节点是安全边界：服务器发来的每个参数都要校验，只能执行协议里定义的几种 herdr 操作。
 - 新增对某个 agent 的支持（会话记录格式、终端界面、确认框），请附上真实样例做测试，并在 [`docs/AGENTS.md`](docs/AGENTS.md) 里写明验证情况。
 - 注释用中文 XML 文档注释（`/// <summary>`），句末带句号；方法内部只在不显而易见的地方写注释，说明"为什么"。术语统一用"服务器""节点""设备""agent""主人"。

@@ -1,0 +1,93 @@
+# 推送版本标签（例如 v0.2.0）时，编译各平台的单文件程序并发布到 GitHub Releases。
+# 改了打包流程的 PR 也会编译、打包一遍（不发布），确认流程没坏。
+#
+# 发布的文件名不带版本号，最新版的下载地址固定：
+#   https://github.com/<仓库>/releases/latest/download/chatpilot-server-linux-x64.tar.gz
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/publish.sh
+      - deploy/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.rid }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { rid: linux-x64, os: ubuntu-latest }
+          - { rid: linux-arm64, os: ubuntu-latest }
+          - { rid: win-x64, os: ubuntu-latest }
+          # macOS 的程序要在 macOS 上编译：编译时会给程序做 ad-hoc 签名，没签名的程序在 Apple 芯片上一运行就被系统杀掉。
+          - { rid: osx-arm64, os: macos-latest }
+          - { rid: osx-x64, os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: 编译
+        env:
+          RIDS: ${{ matrix.rid }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then export VERSION="${GITHUB_REF_NAME#v}"; fi
+          scripts/publish.sh "$RUNNER_TEMP/publish"
+
+      - name: 打包
+        env:
+          RID: ${{ matrix.rid }}
+        run: |
+          mkdir -p dist
+          cd "$RUNNER_TEMP/publish/$RID"
+          for part in server node; do
+            name="chatpilot-$part-$RID"
+            mv "$part" "$name"
+            if [[ "$RID" == win-* ]]; then
+              zip -qr "$GITHUB_WORKSPACE/dist/$name.zip" "$name"
+            else
+              tar -czf "$GITHUB_WORKSPACE/dist/$name.tar.gz" "$name"
+            fi
+          done
+          ls -l "$GITHUB_WORKSPACE/dist"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.rid }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum chatpilot-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          prerelease=()
+          [[ "$GITHUB_REF_NAME" != *-* ]] || prerelease=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" * --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes "${prerelease[@]}"

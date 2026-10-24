@@ -4,6 +4,8 @@
 
 *Command the AI coding agents (Claude Code, Codex, …) on all your computers from WeChat on your phone.*
 
+[![CI](https://github.com/smallpeanutbaby/ChatPilot/actions/workflows/ci.yml/badge.svg)](https://github.com/smallpeanutbaby/ChatPilot/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/smallpeanutbaby/ChatPilot)](https://github.com/smallpeanutbaby/ChatPilot/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![.NET 10](https://img.shields.io/badge/.NET-10-512BD4)
 ![Platforms](https://img.shields.io/badge/node-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
@@ -92,7 +94,7 @@
 - **一个微信号**：用来绑定机器人、接收通知。
 - **放服务器的地方**：一台云服务器（1 核 1G 就够，香港或海外不用备案）；只有一台电脑时也可以直接放在这台电脑上。**不需要域名，也不需要买证书。**
 - **网络**：服务器要能访问 `https://ilinkai.weixin.qq.com`；每台电脑要能访问服务器的 8443 端口。
-- **打包用**：[.NET 10 SDK](https://dotnet.microsoft.com/download)，只在打包的那台电脑上需要。Windows 上运行打包脚本需要 Git Bash。
+- **程序**：从 [Releases](https://github.com/smallpeanutbaby/ChatPilot/releases/latest) 下载对应系统的压缩包，解压就能用，不用装 .NET。想自己打包的话需要 [.NET 10 SDK](https://dotnet.microsoft.com/download)，见[自己打包](#自己打包)。
 
 > **为什么一定要 herdr？** 节点不直接操作终端，而是通过 herdr：开终端、判断 agent 是在工作还是在等确认、读写终端、拿到会话记录。这些对 20 多种 agent 都要单独适配，herdr 已经做好了。不装 herdr 的话，节点什么也做不了。
 
@@ -100,15 +102,9 @@
 
 先在一台电脑上把服务器和节点都跑起来，不用云服务器。下面以 Windows 为例，macOS / Linux 同理（自启方式见[正式部署](#正式部署)）。
 
-**1. 打包**（在 Git Bash 里运行）
+**1. 下载**：从 [Releases](https://github.com/smallpeanutbaby/ChatPilot/releases/latest) 下载 `chatpilot-server-win-x64.zip` 和 `chatpilot-node-win-x64.zip`，把解压出来的两个文件夹里的内容分别放到 `C:\Tools\chatpilot\server\` 和 `C:\Tools\chatpilot\node\`（位置随意，下面以它为例）。程序旁边已经带好了开机自启脚本。
 
-```bash
-RIDS="win-x64" scripts/publish.sh        # 输出到 artifacts/win-x64/{server,node}/
-```
-
-可选平台：`win-x64`、`osx-arm64`、`osx-x64`、`linux-x64`、`linux-arm64`，不写 `RIDS` 就全部打包。
-
-**2. 配置服务器只听本机**：把 `artifacts/win-x64/server/` 拷到比如 `C:\Tools\chatpilot\server\`，修改里面的 `appsettings.json`：
+**2. 配置服务器只听本机**：修改 `C:\Tools\chatpilot\server\appsettings.json`：
 
 ```json
 "ChatPilot": {
@@ -131,7 +127,7 @@ C:\Tools\chatpilot\server\chatpilot-server.exe login
 **4. 让服务器常驻**（登录 Windows 后自动启动）
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File deploy\windows\install-server-task.ps1 -ServerPath C:\Tools\chatpilot\server\chatpilot-server.exe
+powershell -ExecutionPolicy Bypass -File C:\Tools\chatpilot\server\install-server-task.ps1 -ServerPath C:\Tools\chatpilot\server\chatpilot-server.exe
 ```
 
 **5. 配对节点**：在微信里发 `/pair win`，把返回的命令拿到这台电脑上运行，加上允许 `/new` 打开的目录：
@@ -139,12 +135,14 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\install-server-task.ps1 
 ```powershell
 C:\Tools\chatpilot\node\chatpilot-node.exe pair --server http://127.0.0.1:8443 --code ABCD-EFGH --name win --root D:\code
 C:\Tools\chatpilot\node\chatpilot-node.exe doctor
-powershell -ExecutionPolicy Bypass -File deploy\windows\install-node-task.ps1 -NodePath C:\Tools\chatpilot\node\chatpilot-node.exe
+powershell -ExecutionPolicy Bypass -File C:\Tools\chatpilot\node\install-node-task.ps1 -NodePath C:\Tools\chatpilot\node\chatpilot-node.exe
 ```
 
 **6. 试一下**：微信里发 `/devices`，看到 `🟢 win` 就通了；发 `/ls` 列出 agent，`@序号 内容` 派活。完整用法见[使用指南](#使用指南)。
 
 > Windows 上用 npm 装的 codex、kimi、pi 是通过 `.ps1` 脚本启动的。如果 `/new` 启动它们时超时，执行一次 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`。
+>
+> 程序没有代码签名。双击运行时如果弹出"Windows 已保护你的电脑"，或者计划任务脚本被拦住，先解除下载标记：`Get-ChildItem C:\Tools\chatpilot -Recurse | Unblock-File`。
 
 ## 正式部署
 
@@ -152,17 +150,16 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\install-node-task.ps1 -N
 
 ### 服务器（Linux 云服务器）
 
-用安装脚本 [`deploy/linux/install-server.sh`](deploy/linux/install-server.sh)，一条命令装好：
+安装包里带了安装脚本 [`install-server.sh`](deploy/linux/install-server.sh)，在服务器上下载、解压、运行：
 
 ```bash
-# 在打包的电脑上：打出来的 artifacts/linux-x64/server/ 里已经带好了安装脚本和服务文件
-RIDS="linux-x64" scripts/publish.sh            # ARM 服务器用 linux-arm64
-ssh 你的服务器 'rm -rf ~/chatpilot-upload'       # 先删掉上次上传的，否则 scp 会把新包套进旧目录里
-scp -r artifacts/linux-x64/server 你的服务器:~/chatpilot-upload
-
-# 在服务器上
-sudo bash ~/chatpilot-upload/install-server.sh --public-url https://服务器IP:8443
+# ARM 服务器把下面两处 x64 换成 arm64
+curl -fLO https://github.com/smallpeanutbaby/ChatPilot/releases/latest/download/chatpilot-server-linux-x64.tar.gz
+tar -xzf chatpilot-server-linux-x64.tar.gz
+sudo bash chatpilot-server-linux-x64/install-server.sh --public-url https://服务器IP:8443
 ```
+
+服务器访问不了 GitHub 的话，在自己电脑上下载好，用 `scp` 传上去再解压；或者[自己打包](#自己打包)，把 `artifacts/linux-x64/server/` 整个目录传上去（目录里同样带着安装脚本）。
 
 脚本会：检查环境（CPU 架构、ICU 库、参数格式）→ 建 `chatpilot` 系统用户和目录 → 安装程序和 systemd 服务 → 没绑定过微信时在终端里显示二维码让你扫 → 用 ufw / firewalld 放行端口 → 启动并做健康检查 → 打印**证书指纹**（`sha256:…`，节点配对时要用）。
 
@@ -174,13 +171,14 @@ sudo bash ~/chatpilot-upload/install-server.sh --public-url https://服务器IP:
 <summary>不用脚本，手动安装</summary>
 
 ```bash
+cd chatpilot-server-linux-x64        # 解压出来的安装包目录
 sudo useradd --system --home /var/lib/chatpilot --shell /usr/sbin/nologin chatpilot
 sudo mkdir -p /opt/chatpilot /var/lib/chatpilot && sudo chown chatpilot: /var/lib/chatpilot && sudo chmod 700 /var/lib/chatpilot
-sudo cp ~/chatpilot-upload/chatpilot-server ~/chatpilot-upload/appsettings.json /opt/chatpilot/ && sudo chmod +x /opt/chatpilot/chatpilot-server
+sudo cp chatpilot-server appsettings.json /opt/chatpilot/ && sudo chmod +x /opt/chatpilot/chatpilot-server
 sudo -u chatpilot env ChatPilot__DataDir=/var/lib/chatpilot /opt/chatpilot/chatpilot-server login   # 扫码绑定微信
 
 # 把 service 文件里的 ChatPilot__PublicUrl 改成 https://服务器IP:8443，再注册成服务
-sudo cp ~/chatpilot-upload/chatpilot-server.service /etc/systemd/system/ && sudo systemctl daemon-reload
+sudo cp chatpilot-server.service /etc/systemd/system/ && sudo systemctl daemon-reload
 sudo systemctl enable --now chatpilot-server
 journalctl -u chatpilot-server -f    # 看日志；记下打印出来的证书指纹 sha256:…
 ```
@@ -194,7 +192,18 @@ journalctl -u chatpilot-server -f    # 看日志；记下打印出来的证书�
 
 ### 节点：每台电脑
 
-无论哪个系统，第一步都一样：在微信里发 `/pair 设备名`，复制返回的命令在那台电脑上运行（命令里已经带好了服务器地址、配对码和证书指纹），再加上 `--root` 指定允许 `/new` 打开的目录：
+先从 [Releases](https://github.com/smallpeanutbaby/ChatPilot/releases/latest) 下载这台电脑对应的节点并解压：
+
+| 系统 | 文件 |
+|---|---|
+| Windows | `chatpilot-node-win-x64.zip` |
+| macOS（Apple 芯片） | `chatpilot-node-osx-arm64.tar.gz` |
+| macOS（Intel） | `chatpilot-node-osx-x64.tar.gz` |
+| Linux | `chatpilot-node-linux-x64.tar.gz`、`chatpilot-node-linux-arm64.tar.gz` |
+
+程序没有代码签名。macOS 上用浏览器下载的，第一次运行会被系统拦住，先解除隔离：`xattr -d com.apple.quarantine chatpilot-node`（用 `curl` 下载的没有这个问题）。
+
+然后无论哪个系统都一样：在微信里发 `/pair 设备名`，复制返回的命令在那台电脑上运行（命令里已经带好了服务器地址、配对码和证书指纹），再加上 `--root` 指定允许 `/new` 打开的目录：
 
 ```bash
 chatpilot-node pair --server https://服务器IP:8443 --code ABCD-EFGH \
@@ -206,10 +215,12 @@ chatpilot-node doctor     # 自检：herdr、允许的目录、agent 类型、�
 
 然后设成开机自启：
 
+下面的命令都在解压出来的节点目录里运行，自启用的文件就在程序旁边。
+
 **Windows**：登录后通过计划任务启动。不要注册成 Windows 服务：服务账户访问不到你的 herdr。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File deploy\windows\install-node-task.ps1 -NodePath C:\Tools\chatpilot\node\chatpilot-node.exe
+powershell -ExecutionPolicy Bypass -File C:\Tools\chatpilot\node\install-node-task.ps1 -NodePath C:\Tools\chatpilot\node\chatpilot-node.exe
 # 日志：%LOCALAPPDATA%\ChatPilot\node.log
 # 卸载：Unregister-ScheduledTask -TaskName ChatPilotNode -Confirm:$false
 ```
@@ -218,8 +229,8 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\install-node-task.ps1 -N
 
 ```bash
 sudo cp chatpilot-node /usr/local/bin/
-# 把 deploy/macos/com.chatpilot.node.plist 里的 YOUR_NAME 换成你的用户名
-cp deploy/macos/com.chatpilot.node.plist ~/Library/LaunchAgents/
+# 把 com.chatpilot.node.plist 里的 YOUR_NAME 换成你的用户名
+cp com.chatpilot.node.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.chatpilot.node.plist
 tail -f ~/Library/Logs/chatpilot-node.log                      # 日志
 launchctl bootout gui/$(id -u)/com.chatpilot.node              # 停止
@@ -229,7 +240,7 @@ launchctl bootout gui/$(id -u)/com.chatpilot.node              # 停止
 
 ```bash
 cp chatpilot-node ~/.local/bin/
-mkdir -p ~/.config/systemd/user && cp deploy/linux/chatpilot-node.service ~/.config/systemd/user/
+mkdir -p ~/.config/systemd/user && cp chatpilot-node.service ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now chatpilot-node
 loginctl enable-linger $USER                  # 没登录桌面时也保持运行
 journalctl --user -u chatpilot-node -f        # 日志
@@ -237,9 +248,9 @@ journalctl --user -u chatpilot-node -f        # 日志
 
 ### 升级
 
-重新打包后，停掉服务、替换可执行文件、再启动即可。配置、微信绑定、配对关系都在数据目录里，不受影响。
+下载新版本（或重新打包）后，停掉服务、替换可执行文件、再启动即可。配置、微信绑定、配对关系都在数据目录里，不受影响。
 
-- 服务器：按[上面的方式](#服务器linux-云服务器)重新上传（先删掉旧的 `~/chatpilot-upload`），再运行一次 `install-server.sh`，同样带上 `--public-url`；或者手动 `sudo systemctl stop chatpilot-server` → 替换 `/opt/chatpilot/chatpilot-server` → `sudo systemctl start chatpilot-server`。
+- 服务器：按[上面的方式](#服务器linux-云服务器)下载、解压新版本，再运行一次 `install-server.sh`，同样带上 `--public-url`；或者手动 `sudo systemctl stop chatpilot-server` → 替换 `/opt/chatpilot/chatpilot-server` → `sudo systemctl start chatpilot-server`。用 `scp` 上传目录的话，先删掉服务器上的旧目录，否则新目录会被套进旧目录里。
 - 节点：Windows 用 `Stop-ScheduledTask` / `Start-ScheduledTask -TaskName ChatPilotNode`，macOS 用 `launchctl bootout` / `bootstrap`，Linux 用 `systemctl --user restart chatpilot-node`。
 
 服务器和节点之间的协议有版本号，升级时尽量两边一起升。
@@ -496,6 +507,24 @@ dotnet build ChatPilot.sln     # 警告视为错误；src 下公开成员必须�
 dotnet test ChatPilot.sln      # 单元测试 + 集成测试 + 安全测试（模拟 herdr、模拟 iLink、内存服务器）
 ```
 
+每个 PR 都会由 GitHub Actions 在 Linux、macOS、Windows 上各跑一遍测试，三项都通过才能合并。
+
+### 自己打包
+
+需要 [.NET 10 SDK](https://dotnet.microsoft.com/download)；Windows 上在 Git Bash 里运行。
+
+```bash
+RIDS="win-x64" scripts/publish.sh        # 输出到 artifacts/win-x64/{server,node}/
+```
+
+可选平台：`win-x64`、`osx-arm64`、`osx-x64`、`linux-x64`、`linux-arm64`，不写 `RIDS` 就全部打包。输出目录和 Releases 里的压缩包内容一样，程序旁边带着安装和开机自启脚本。macOS 的程序要在 Mac 上打包，否则没有签名，在 Apple 芯片上运行不了。
+
+### 发布新版本
+
+1. 通过 PR 把 [`Directory.Build.props`](Directory.Build.props) 里的 `Version` 改成新版本号，合并。
+2. 在 main 上打标签并推送：`git tag v0.2.0 && git push origin v0.2.0`。
+3. GitHub Actions 会编译 5 个平台、打包，连同 `SHA256SUMS.txt` 发布到 Releases。标签带 `-`（例如 `v0.2.0-beta.1`）时发布为预发布版本。
+
 不用微信也能在本机调试：服务器开测试通道，用 HTTP 模拟手机发消息，`GET /dev/events` 取主动通知。
 
 ```bash
@@ -523,7 +552,7 @@ docs/                  设计、验收、安全、各 agent 支持细节
 
 ## 贡献
 
-欢迎提 Issue 和 Pull Request。`main` 分支受保护，所有改动（包括维护者自己的）都通过 Pull Request 合并：先 fork，在自己的分支上改，跑通 `dotnet build` 和 `dotnet test`，再提 PR。详细约定见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
+欢迎提 Issue 和 Pull Request。`main` 分支受保护，所有改动（包括维护者自己的）都通过 Pull Request 合并：先 fork，在自己的分支上改，跑通 `dotnet build` 和 `dotnet test`，再提 PR；三个系统上的自动测试都通过才能合并。详细约定见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
 
 ## 致谢
 
