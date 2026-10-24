@@ -56,6 +56,9 @@ internal sealed class FakeHerdr : IProcessRunner
         public string Cwd { get; set; } = "/tmp";
 
         public string? Title { get; set; }
+
+        /// <summary>为 true 时 herdr 查不到它（get、wait、list 都当它不存在），模拟 agent 重启时 herdr 一时没识别出来。</summary>
+        public bool Hidden { get; set; }
     }
 
     public ConcurrentQueue<string[]> Calls { get; } = new();
@@ -109,7 +112,7 @@ internal sealed class FakeHerdr : IProcessRunner
     {
         lock (_lock)
         {
-            return _agents.FirstOrDefault(a => a.Name == target || a.PaneId == target);
+            return _agents.FirstOrDefault(a => !a.Hidden && (a.Name == target || a.PaneId == target));
         }
     }
 
@@ -131,7 +134,7 @@ internal sealed class FakeHerdr : IProcessRunner
             case "agent list":
                 lock (_lock)
                 {
-                    return Ok(new { type = "agent_list", agents = _agents.Select(ToJson).ToArray() });
+                    return Ok(new { type = "agent_list", agents = _agents.Where(x => !x.Hidden).Select(ToJson).ToArray() });
                 }
 
             case "workspace list":

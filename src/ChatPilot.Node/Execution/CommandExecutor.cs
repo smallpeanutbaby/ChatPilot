@@ -271,7 +271,10 @@ public sealed class CommandExecutor(
             : $"它现在没在干活，没有按键{note}"));
     }
 
-    /// <summary><c>/close</c>：关闭 agent 所在的 pane，丢掉它排队的指令和任务记录。</summary>
+    /// <summary>
+    /// <c>/close</c>：关闭 agent 所在的 pane，丢掉它排队的指令和任务记录。
+    /// 先停掉对它的跟踪再关：关掉之后跟踪方会发现 agent 不见了，不能把这当成任务失败通知主人。
+    /// </summary>
     /// <param name="command">指令，带目标。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>已关闭的确认；目标不合法时为失败结果。</returns>
@@ -284,8 +287,8 @@ public sealed class CommandExecutor(
         }
 
         var agent = await herdr.GetAgentAsync(command.Target, cancellationToken).ConfigureAwait(false);
-        await herdr.ClosePaneAsync(agent.PaneId, cancellationToken).ConfigureAwait(false);
         tracker.Forget(agent.PaneId);
+        await herdr.ClosePaneAsync(agent.PaneId, cancellationToken).ConfigureAwait(false);
         logger.LogInformation("按主人的要求关闭了 {Agent}（{Pane}）", agent.Name ?? agent.PaneId, agent.PaneId);
         return CommandOutcome.Success(new AckData($"已关闭（{agent.PaneId}）"));
     }

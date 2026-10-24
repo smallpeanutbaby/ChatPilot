@@ -50,8 +50,8 @@ public sealed class PromptTracker : IAsyncDisposable
     /// <summary>排队泵每次用 <c>agent wait</c> 等它空闲最多等多久，到时再检查一遍队列（可能已被 /stop 清空）。</summary>
     private static readonly TimeSpan QueueWaitSlice = TimeSpan.FromSeconds(30);
 
-    /// <summary>herdr 识别不出 pane 里的 agent 时，排队泵最多等多久再认定它已经不在了。</summary>
-    private static readonly TimeSpan KindlessGrace = TimeSpan.FromMinutes(1);
+    /// <summary>herdr 认不出（识别不出类型，或者干脆查不到）pane 里的 agent 时，排队泵最多等多久再认定它已经不在了。</summary>
+    private static readonly TimeSpan UnrecognizedGrace = TimeSpan.FromMinutes(1);
 
     /// <summary>算作"停下了"的状态：空闲、做完、等确认，等到这些就上报。</summary>
     private static readonly string[] SettledStates = [AgentStatus.Idle, AgentStatus.Done, AgentStatus.Blocked];
@@ -71,8 +71,11 @@ public sealed class PromptTracker : IAsyncDisposable
     /// <summary>正在运行的后台任务（跟踪和排队泵），退出时等它们结束。</summary>
     private readonly ConcurrentDictionary<Guid, Task> _running = new();
 
-    /// <summary>正在后台跟踪的 pane（值不用），保证每个 pane 同时只有一个跟踪任务。</summary>
-    private readonly ConcurrentDictionary<string, byte> _watched = new(StringComparer.Ordinal);
+    /// <summary>
+    /// 正在后台跟踪的 pane 和这次跟踪的取消源，保证每个 pane 同时只有一个跟踪任务。
+    /// 取消源连着 <see cref="_stopping"/>，pane 被 <see cref="Forget"/> 时单独取消。
+    /// </summary>
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _watched = new(StringComparer.Ordinal);
 
     /// <summary>同时跟踪的名额，共 <see cref="MaxWatchers"/> 个；排队泵不占名额。</summary>
     private readonly SemaphoreSlim _slots = new(MaxWatchers, MaxWatchers);
@@ -97,8 +100,11 @@ public sealed class PromptTracker : IAsyncDisposable
     /// <summary>已经决定立即提交、还没交给后台跟踪的 pane（由 <see cref="_submitGate"/> 保护）；这期间发来的指令一律排队。</summary>
     private readonly HashSet<string> _submitting = new(StringComparer.Ordinal);
 
-    /// <summary>每个 pane 最近一次上报时的状态序号：盯梢（<see cref="AgentWatcher"/>）看到同一个状态就不再重复通知。</summary>
-    private readonly ConcurrentDictionary<string, long> _reportedSeq = new(StringComparer.Ordinal);
+    /// <summary>
+    /// 每个 pane 最近一次上报时的终端 ID 和状态序号：盯梢（<see cref="AgentWatcher"/>）看到同一个状态就不再重复通知。
+    /// 记下终端 ID 是因为 herdr 重启后 pane ID 从头编号、状态序号也重新计，旧的序号不能拿来比；条数太多时整个清空。
+    /// </summary>
+    private readonly ConcurrentDictionary<string, (string? TerminalId, long Seq)> _reportedSeq = new(StringComparer.Ordinal);
 
     /// <summary>结果已经上报、还没发到服务器的任务：跟踪结束时不能删它们的记录。</summary>
     private readonly ConcurrentDictionary<Guid, byte> _awaitingDelivery = new();
@@ -235,20 +241,38 @@ public sealed class PromptTracker : IAsyncDisposable
     /// <returns>正在跟踪或提交为 true。</returns>
     internal bool IsTracking(string paneId) => IsBusy(paneId);
 
-    /// <summary>这个 pane 最近一次上报结果时的状态序号；没上报过为 null。</summary>
-    /// <param name="paneId">agent 所在 pane。</param>
-    /// <returns>上报时的状态序号；没上报过为 null。</returns>
-    internal long? LastReportedSeq(string paneId) => _reportedSeq.TryGetValue(paneId, out var seq) ? seq : null;
+    /// <summary>这个 agent 最近一次上报结果时的状态序号；没上报过（或者上报的是同一个 pane 里以前的终端）为 null。</summary>
+    /// <param name="agent">现在 pane 里的 agent。</param>
+    /// <returns>上报时的状态序号；没上报过、或者那时 pane 里是别的终端时为 null。</returns>
+    internal long? LastReportedSeq(HerdrAgent agent) =>
+        _reportedSeq.TryGetValue(agent.PaneId, out var reported) && reported.TerminalId == agent.TerminalId ? reported.Seq : null;
 
     /// <summary>清空这个 pane 排队的指令，返回清掉了几条。</summary>
     /// <param name="paneId">agent 所在 pane。</param>
     /// <returns>清掉的条数；本来就没有排队时为 0。</returns>
     public int ClearQueue(string paneId) => _queue.Clear(paneId);
 
-    /// <summary>pane 被关闭了：丢掉排队的指令和任务记录（正在跟踪的后台任务会因为找不到 agent 自己结束）。</summary>
-    /// <param name="paneId">被关闭的 pane。</param>
+    /// <summary>
+    /// pane 要被关闭了：停掉它的后台跟踪（之后不再为它上报任何结果），丢掉排队的指令、挂起的初始说明和任务记录。
+    /// 要在关闭 pane 之前调用：关闭之后后台跟踪会发现 agent 不见了，不能把这当成任务失败、或者当成做完了上报。
+    /// </summary>
+    /// <param name="paneId">要关闭的 pane。</param>
     public void Forget(string paneId)
     {
+        if (_watched.TryGetValue(paneId, out var watch))
+        {
+            try
+            {
+                // 取消回调放到别的线程上跑，后台跟踪的收尾不在这里同步执行。
+                _ = watch.CancelAsync();
+            }
+            catch (ObjectDisposedException)
+            {
+                // 跟踪刚好结束了。
+            }
+        }
+
+        _pendingInitialPrompts.TryRemove(paneId, out _);
         _queue.Clear(paneId);
         if (_tasks.Find(paneId) is { } task)
         {
@@ -256,6 +280,7 @@ public sealed class PromptTracker : IAsyncDisposable
         }
 
         _lastPrompts.TryRemove(paneId, out _);
+        _reportedSeq.TryRemove(paneId, out _);
     }
 
     /// <summary>立即提交文字，然后在后台等结果。</summary>
@@ -510,21 +535,24 @@ public sealed class PromptTracker : IAsyncDisposable
 
     /// <summary>
     /// 为一个 agent 启动后台跟踪。已经在跟踪时不重复启动（现有的跟踪会负责上报）；
-    /// herdr 出错时上报失败事件。
+    /// herdr 出错时上报失败事件。pane 被 <see cref="Forget"/> 之后悄悄结束，什么都不上报。
     /// </summary>
     /// <param name="agent">要跟踪的 agent。</param>
-    /// <param name="work">后台要做的事，参数是节点退出时取消的令牌。</param>
+    /// <param name="work">后台要做的事，参数是节点退出或 pane 被关闭时取消的令牌。</param>
     /// <returns>有没有启动；只有 <see cref="WatchResult.Started"/> 时 <paramref name="work"/> 才会运行。</returns>
     private WatchResult TryWatch(HerdrAgent agent, Func<CancellationToken, Task> work)
     {
-        if (!_watched.TryAdd(agent.PaneId, 0))
+        var watch = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token);
+        if (!_watched.TryAdd(agent.PaneId, watch))
         {
+            watch.Dispose();
             return WatchResult.AlreadyWatching;
         }
 
         if (!_slots.Wait(0))
         {
-            _watched.TryRemove(agent.PaneId, out _);
+            _watched.TryRemove(new KeyValuePair<string, CancellationTokenSource>(agent.PaneId, watch));
+            watch.Dispose();
             return WatchResult.Busy;
         }
 
@@ -532,7 +560,11 @@ public sealed class PromptTracker : IAsyncDisposable
         {
             try
             {
-                await work(_stopping.Token).ConfigureAwait(false);
+                await work(watch.Token).ConfigureAwait(false);
+            }
+            catch (Exception ex) when ((ex is OperationCanceledException or HerdrException) && IsClosed(watch))
+            {
+                // pane 被关闭了：跟踪发现 agent 不见了是意料之中的，不当成任务失败上报。
             }
             catch (HerdrException ex) when (!_stopping.IsCancellationRequested)
             {
@@ -542,7 +574,7 @@ public sealed class PromptTracker : IAsyncDisposable
             }
             finally
             {
-                _watched.TryRemove(agent.PaneId, out _);
+                _watched.TryRemove(new KeyValuePair<string, CancellationTokenSource>(agent.PaneId, watch));
                 _slots.Release();
 
                 // 没上报任何结果就结束了（agent 不见了、确认后直接回到空闲、节点在退出），任务记录也就没用了。
@@ -551,10 +583,17 @@ public sealed class PromptTracker : IAsyncDisposable
                 {
                     _tasks.Remove(task.Id);
                 }
+
+                watch.Dispose();
             }
         });
         return WatchResult.Started;
     }
+
+    /// <summary>这次跟踪是不是因为 pane 被关闭（<see cref="Forget"/>）而取消的；节点退出导致的取消不算。</summary>
+    /// <param name="watch">这次跟踪的取消源。</param>
+    /// <returns>被关闭为 true。</returns>
+    private bool IsClosed(CancellationTokenSource watch) => watch.IsCancellationRequested && !_stopping.IsCancellationRequested;
 
     /// <summary>
     /// 提交后：先确认 agent 开始干活，再等它停下并上报。
@@ -771,7 +810,10 @@ public sealed class PromptTracker : IAsyncDisposable
         Publish(blocked ? AgentEventKind.Blocked : AgentEventKind.Completed, agent, text);
     }
 
-    /// <summary>上报事件。这个 agent 的任务记录等事件确实发到服务器之后再删，发出之前节点退出的话，重启后会再查一次。</summary>
+    /// <summary>
+    /// 上报事件。这个 agent 的任务记录等事件确实发到服务器之后再删，发出之前节点退出的话，重启后会再查一次。
+    /// pane 已经被 <see cref="Forget"/> 的话不上报（关闭前最后一刻的跟踪结果没有意义）。
+    /// </summary>
     /// <param name="kind">事件种类。</param>
     /// <param name="agent">相关的 agent。</param>
     /// <param name="text">事件文字。</param>
@@ -781,6 +823,11 @@ public sealed class PromptTracker : IAsyncDisposable
         if (queued is not null)
         {
             _sink.Publish(new AgentEvent(kind, agent.ToSummary(workspaceLabel: null), text, Summarize(queued.Text), queued.EnqueuedAt, _queue.Count(agent.PaneId)));
+            return;
+        }
+
+        if (_watched.TryGetValue(agent.PaneId, out var watch) && IsClosed(watch))
+        {
             return;
         }
 
@@ -796,7 +843,12 @@ public sealed class PromptTracker : IAsyncDisposable
             };
         }
 
-        _reportedSeq[agent.PaneId] = agent.StateChangeSeq;
+        if (_reportedSeq.Count >= MaxWatchers * 8)
+        {
+            _reportedSeq.Clear();
+        }
+
+        _reportedSeq[agent.PaneId] = (agent.TerminalId, agent.StateChangeSeq);
         var agentEvent = new AgentEvent(
             kind,
             agent.ToSummary(workspaceLabel: null),
@@ -852,13 +904,13 @@ public sealed class PromptTracker : IAsyncDisposable
     /// <summary>
     /// 逐条发出排队的指令：等 agent 空闲、并且没有别的后台跟踪（上一条的结果已经上报）时，过一会儿再确认一次，然后提交下一条。
     /// 排队时的那个 agent 不见了（或者换成了别的终端、别的类型），丢掉给它排的指令并通知，给现在这个 agent 排的照常发；
-    /// herdr 暂时识别不出 agent 时先等一会儿，不急着丢。排太久的丢掉并通知。
+    /// herdr 暂时认不出 agent（查不到，或者识别不出类型）时先等 <see cref="UnrecognizedGrace"/>，不急着丢。排太久的丢掉并通知。
     /// </summary>
     /// <param name="paneId">要发出排队指令的 pane。</param>
     /// <param name="cancellationToken">节点退出时取消。</param>
     private async Task PumpQueueAsync(string paneId, CancellationToken cancellationToken)
     {
-        DateTimeOffset? kindlessSince = null;
+        DateTimeOffset? unrecognizedSince = null;
         while (_queue.Peek(paneId) is { } next)
         {
             if (DateTimeOffset.UtcNow - next.EnqueuedAt > WaitLimit)
@@ -900,10 +952,12 @@ public sealed class PromptTracker : IAsyncDisposable
                 continue;
             }
 
-            if (agent is { Kind: null } && (next.TerminalId is null || agent.TerminalId == next.TerminalId))
+            // herdr 暂时认不出这个 agent：查不到（agent 正在重启、自我更新，herdr 一时没识别出来），
+            // 或者还是同一个终端、只是识别不出类型。先等一会儿，不急着丢掉整个队列。
+            if (agent is null || (agent.Kind is null && (next.TerminalId is null || agent.TerminalId == next.TerminalId)))
             {
-                kindlessSince ??= DateTimeOffset.UtcNow;
-                if (DateTimeOffset.UtcNow - kindlessSince < KindlessGrace)
+                unrecognizedSince ??= DateTimeOffset.UtcNow;
+                if (DateTimeOffset.UtcNow - unrecognizedSince < UnrecognizedGrace)
                 {
                     await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
                     continue;
@@ -911,7 +965,7 @@ public sealed class PromptTracker : IAsyncDisposable
             }
             else
             {
-                kindlessSince = null;
+                unrecognizedSince = null;
             }
 
             if (agent is null || !SameAgent(next, agent))

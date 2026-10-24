@@ -237,6 +237,77 @@ public sealed class QueueAndWatchTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Closing_a_tracked_agent_does_not_report_a_bogus_failure()
+    {
+        // 审查：/close 正在跟踪的 agent，跟踪方发现它不见了，不能当成任务失败（或者做完了）通知。
+        var fresh = _herdr.AddAgent("fresh", "Fresh");
+        var busy = _herdr.AddAgent("busy", "Busy");
+        _herdr.SwallowPrompts = 1;
+        Assert.True((await _executor.ExecuteAsync(new PromptCommand(fresh.PaneId, "刚发出去"), CancellationToken.None)).Ok);
+        _herdr.PromptDelay = TimeSpan.FromSeconds(30);
+        Assert.True((await _executor.ExecuteAsync(new PromptCommand(busy.PaneId, "正在干"), CancellationToken.None)).Ok);
+        await Task.Delay(200);
+
+        Assert.True((await _executor.ExecuteAsync(new CloseAgentCommand("fresh"), CancellationToken.None)).Ok);
+        Assert.True((await _executor.ExecuteAsync(new CloseAgentCommand("busy"), CancellationToken.None)).Ok);
+        await DevChat.EventuallyAsync(
+            () => Task.FromResult(!_tracker.IsTracking(fresh.PaneId) && !_tracker.IsTracking(busy.PaneId)), "关闭后应该停止跟踪");
+        await Task.Delay(1500);
+        Assert.Empty(_events.Received);
+    }
+
+    [Fact]
+    public async Task Queued_prompts_wait_a_moment_when_herdr_cannot_find_the_agent()
+    {
+        // 审查：Claude Code 重启或自我更新时 herdr 一时查不到它，不能马上丢掉整个队列。
+        var agent = _herdr.AddAgent("tideq", "TideQ", "working");
+        var path = _temp.Combine("unrecognized.queue.json");
+        new PromptQueue(path, NullLogger.Instance).Enqueue(await _client.GetAgentAsync(agent.PaneId, CancellationToken.None), "一", DateTimeOffset.UtcNow);
+        agent.Hidden = true;
+        agent.Status = "idle";
+
+        var sink = new RecordingSink();
+        await using var tracker = Tracker(sink, path);
+        tracker.ResumeTrackedTasks();
+        await Task.Delay(700);
+        Assert.Empty(sink.Received);
+        Assert.Equal(1, tracker.QueuedCount(agent.PaneId));
+
+        agent.Hidden = false;
+        var ev = await sink.WaitAsync();
+        Assert.Equal((AgentEventKind.Completed, "一"), (ev.Kind, ev.Prompt));
+    }
+
+    [Fact]
+    public async Task Watcher_still_reports_after_herdr_restarts_and_reuses_the_pane_id()
+    {
+        // 审查：herdr 重启后 pane ID 从头编号、状态序号也重新计；旧终端上报过的大序号不能压住新终端的通知。
+        var agent = _herdr.AddAgent("tideq", "TideQ");
+        for (var i = 0; i < 10; i++)
+        {
+            agent.Status = i % 2 == 0 ? "working" : "idle";
+        }
+
+        Assert.True((await _executor.ExecuteAsync(new PromptCommand(agent.PaneId, "只回复：收到"), CancellationToken.None)).Ok);
+        Assert.Equal(AgentEventKind.Completed, (await _events.WaitAsync()).Kind);
+        Assert.True(agent.Seq > 10);
+
+        await _client.ClosePaneAsync(agent.PaneId, CancellationToken.None);
+        await _client.StartAgentAsync("tideq", "claude", agent.PaneId, TimeSpan.FromSeconds(5), CancellationToken.None);
+        var restarted = _herdr.Find(agent.PaneId)!;
+        restarted.TerminalId = "term_after_herdr_restart";
+        await _executor.ExecuteAsync(new WatchCommand(null, true), CancellationToken.None);
+        _watcher.Start();
+        await Task.Delay(200);
+
+        restarted.Status = "working";
+        await Task.Delay(200);
+        restarted.Status = "idle";
+        var done = await _events.WaitAsync();
+        Assert.Equal((AgentEventKind.Completed, agent.PaneId, (string?)null), (done.Kind, done.Agent.PaneId, done.Prompt));
+    }
+
+    [Fact]
     public async Task Watched_agent_reports_work_done_on_the_computer_and_new_confirmation_dialogs()
     {
         var agent = _herdr.AddAgent("tideq", "TideQ");

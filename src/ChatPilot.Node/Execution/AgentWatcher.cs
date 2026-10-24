@@ -264,7 +264,7 @@ public sealed class AgentWatcher : IAsyncDisposable
                 // 跟踪方在上次观察之后上报过，说明这段变化已经通知过了。
                 if (Transition(previous, agent) is { } kind
                     && !_tracker.IsTracking(agent.PaneId)
-                    && !(_tracker.LastReportedSeq(agent.PaneId) > previous.Seq))
+                    && !(_tracker.LastReportedSeq(agent) > previous.Seq))
                 {
                     due.Add((agent, kind));
                 }
