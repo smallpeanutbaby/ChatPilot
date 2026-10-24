@@ -117,14 +117,53 @@ public sealed class ChatDispatcher(
     /// <param name="cancellationToken">取消处理；取消时抛出 <see cref="OperationCanceledException"/>。</param>
     /// <returns>要回复主人的文字；出错时是错误说明。</returns>
     public Task<string> HandleAsync(string text, CancellationToken cancellationToken) =>
-        SerialAsync(() => HandleCoreAsync(text, scheduled: false, cancellationToken), cancellationToken);
+        SerialAsync(() => HandleCoreAsync(text, cancellationToken), cancellationToken);
 
-    /// <summary>执行到点的定时任务。和主人发消息一样排队处理，但不会带走主人暂存的图片。</summary>
-    /// <param name="text">定时任务的内容（<c>@目标 内容</c> 或交给管家的文字）。</param>
-    /// <param name="cancellationToken">取消处理；取消时抛出 <see cref="OperationCanceledException"/>。</param>
-    /// <returns>执行结果的文字，由调用方作为通知推送。</returns>
-    public Task<string> HandleScheduledAsync(string text, CancellationToken cancellationToken) =>
-        SerialAsync(() => HandleCoreAsync(text, scheduled: true, cancellationToken), cancellationToken);
+    /// <summary>
+    /// 取走一个到点的定时任务，需要时执行它。从状态文件里删掉和执行在同一个排队区段里完成，和 <c>/at del</c> 互斥：
+    /// 回复过"已取消"的任务不会再执行，已经执行的任务 <c>/at del</c> 也找不到了。
+    /// 执行时只发给创建时定下的设备和 agent，不带主人暂存的图片，也不改变不写目标时的默认 agent。
+    /// </summary>
+    /// <param name="jobId">任务编号。</param>
+    /// <param name="execute">删掉之后要不要执行；错过太久的任务只删不执行。</param>
+    /// <param name="cancellationToken">取消排队或执行；取消时抛出 <see cref="OperationCanceledException"/>。</param>
+    /// <returns>
+    /// <c>Job</c> 是取走的任务，已经被 <c>/at del</c> 取消（不在状态文件里）时为 null；
+    /// <c>Reply</c> 是执行结果的文字，没有执行时为 null。
+    /// </returns>
+    /// <exception cref="IOException">状态文件写不进去（任务还在，稍后再试）。</exception>
+    internal Task<(ScheduledJob? Job, string? Reply)> TakeScheduledJobAsync(int jobId, bool execute, CancellationToken cancellationToken) =>
+        SerialAsync<(ScheduledJob?, string?)>(async () =>
+        {
+            ScheduledJob? job = null;
+            store.Update(state =>
+            {
+                var index = state.ScheduledJobs.FindIndex(j => j.Id == jobId);
+                if (index >= 0)
+                {
+                    job = state.ScheduledJobs[index];
+                    state.ScheduledJobs.RemoveAt(index);
+                }
+            });
+            if (job is null || !execute)
+            {
+                return (job, null);
+            }
+
+            try
+            {
+                return (job, await RunJobAsync(job, cancellationToken).ConfigureAwait(false));
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "执行定时任务 #{Id} 时出错", job.Id);
+                return (job, "❌ 服务器内部错误，详情见服务器日志");
+            }
+        }, cancellationToken);
 
     /// <summary>主人发来一张图片：暂存起来，等下一条派活的指令一起发出去。</summary>
     /// <param name="data">图片的原始字节。</param>
@@ -140,10 +179,11 @@ public sealed class ChatDispatcher(
         }, cancellationToken);
 
     /// <summary>排队执行：等前一条消息处理完再开始。</summary>
+    /// <typeparam name="T">处理结果的类型。</typeparam>
     /// <param name="work">要执行的处理。</param>
     /// <param name="cancellationToken">取消排队。</param>
     /// <returns><paramref name="work"/> 的结果。</returns>
-    private async Task<string> SerialAsync(Func<Task<string>> work, CancellationToken cancellationToken)
+    private async Task<T> SerialAsync<T>(Func<Task<T>> work, CancellationToken cancellationToken)
     {
         await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -158,13 +198,12 @@ public sealed class ChatDispatcher(
 
     /// <summary>解析并执行一条消息。意外异常记日志并回复“服务器内部错误”，只有取消会抛出去。</summary>
     /// <param name="text">消息原文。</param>
-    /// <param name="scheduled">是不是定时任务；定时任务派活时不带暂存的图片。</param>
     /// <param name="cancellationToken">取消处理。</param>
     /// <returns>要回复的文字。</returns>
-    private async Task<string> HandleCoreAsync(string text, bool scheduled, CancellationToken cancellationToken)
+    private async Task<string> HandleCoreAsync(string text, CancellationToken cancellationToken)
     {
         var command = ChatCommandParser.Parse(text);
-        if (!scheduled && CloseReminder(command) is { } reminder)
+        if (CloseReminder(command) is { } reminder)
         {
             return reminder;
         }
@@ -180,9 +219,9 @@ public sealed class ChatDispatcher(
                 ChatPending => await PendingAsync(cancellationToken).ConfigureAwait(false),
                 ChatRead read => await ReadAsync(read, cancellationToken).ConfigureAwait(false),
                 ChatLast last => await LastReplyAsync(last, cancellationToken).ConfigureAwait(false),
-                ChatPrompt prompt => await PromptAsync(prompt.Target, prompt.Text, withImages: !scheduled, cancellationToken).ConfigureAwait(false),
+                ChatPrompt prompt => await PromptAsync(prompt.Target, prompt.Text, cancellationToken).ConfigureAwait(false),
                 ChatReply reply => await ReplyAsync(reply.Text, cancellationToken).ConfigureAwait(false),
-                ChatButlerPrompt butler => await ButlerPromptAsync(butler.Text, withImages: !scheduled, cancellationToken).ConfigureAwait(false),
+                ChatButlerPrompt butler => await ButlerPromptAsync(butler.Text, cancellationToken).ConfigureAwait(false),
                 ChatNew create => await NewAsync(create, cancellationToken).ConfigureAwait(false),
                 ChatRespond respond => await RespondAsync(respond, cancellationToken).ConfigureAwait(false),
                 ChatKeys keys => await KeysAsync(keys, cancellationToken).ConfigureAwait(false),
@@ -526,13 +565,12 @@ public sealed class ChatDispatcher(
     /// <summary><c>@目标 内容</c>：把任务交给指定的 agent。</summary>
     /// <param name="target">主人写的目标。</param>
     /// <param name="text">任务内容。</param>
-    /// <param name="withImages">要不要带上暂存的图片（定时任务不带）。</param>
     /// <param name="cancellationToken">取消等待。</param>
     /// <returns>发送结果；找不到目标时是原因。</returns>
-    private async Task<string> PromptAsync(TargetRef target, string text, bool withImages, CancellationToken cancellationToken)
+    private async Task<string> PromptAsync(TargetRef target, string text, CancellationToken cancellationToken)
     {
         var (resolved, error) = await ResolveAsync(target, cancellationToken).ConfigureAwait(false);
-        return resolved is null ? "❓ " + error : await SendPromptAsync(resolved, text, withImages, cancellationToken).ConfigureAwait(false);
+        return resolved is null ? "❓ " + error : await SendPromptAsync(resolved, text, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary><c>/re</c>：交给最近打过交道的 agent。</summary>
@@ -542,23 +580,22 @@ public sealed class ChatDispatcher(
     private async Task<string> ReplyAsync(string text, CancellationToken cancellationToken)
     {
         var (resolved, error) = await ResolveOrRecentAsync(null, cancellationToken).ConfigureAwait(false);
-        return resolved is null ? "❓ " + error : await SendPromptAsync(resolved, text, withImages: true, cancellationToken).ConfigureAwait(false);
+        return resolved is null ? "❓ " + error : await SendPromptAsync(resolved, text, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// 把任务发给解析好的 agent，见 <see cref="SendTextAsync"/>。交出去（或排上队）了就记为主人派的活；
+    /// 把主人的任务（带上暂存的图片）发给解析好的 agent，见 <see cref="SendTextAsync"/>。交出去（或排上队）了就记为主人派的活；
     /// 节点说它在等确认时记下来，紧接着的 <c>/yes</c> 就是回应它。
     /// </summary>
     /// <param name="resolved">目标 agent。</param>
     /// <param name="text">任务内容。</param>
-    /// <param name="withImages">要不要带上暂存的图片。</param>
     /// <param name="cancellationToken">取消等待。</param>
     /// <returns>发送结果。</returns>
-    private async Task<string> SendPromptAsync(Resolved resolved, string text, bool withImages, CancellationToken cancellationToken)
+    private async Task<string> SendPromptAsync(Resolved resolved, string text, CancellationToken cancellationToken)
     {
         CommandOutcome? outcome = null;
         var reply = await SendTextAsync(
-            resolved.Device, resolved.Target, text, withImages, resolved.Label, $"已发给 {resolved.Label}", notFound: null,
+            resolved.Device, resolved.Target, text, withImages: true, resolved.Label, $"已发给 {resolved.Label}", notFound: null,
             o => outcome = o, cancellationToken).ConfigureAwait(false);
         if (outcome is { Ok: true })
         {
@@ -576,11 +613,10 @@ public sealed class ChatDispatcher(
     /// 不带 <c>/</c> 或 <c>@</c> 的文字：交给默认设备上名为 <see cref="ButlerName"/> 的管家。交出去了就记为主人派的活；
     /// 管家在等确认时把它记为最近打过交道的、在等确认的，紧接着的 <c>/yes</c> 就是回应它。
     /// </summary>
-    /// <param name="text">原文。</param>
-    /// <param name="withImages">要不要带上暂存的图片（定时任务不带）。</param>
+    /// <param name="text">原文；暂存的图片一起带上。</param>
     /// <param name="cancellationToken">取消等待。</param>
     /// <returns>发送结果；没有可用的默认设备或还没有管家时是提示。</returns>
-    private async Task<string> ButlerPromptAsync(string text, bool withImages, CancellationToken cancellationToken)
+    private async Task<string> ButlerPromptAsync(string text, CancellationToken cancellationToken)
     {
         var (device, error) = DefaultDevice();
         if (device is null)
@@ -591,7 +627,7 @@ public sealed class ChatDispatcher(
         var label = $"[{device.Name}] 的管家";
         CommandOutcome? outcome = null;
         var reply = await SendTextAsync(
-            device, ButlerName, text, withImages, label, $"已交给 {label}",
+            device, ButlerName, text, withImages: true, label, $"已交给 {label}",
             notFound: $"🤖 [{device.Name}] 还没有管家。发 /butler 创建一个，或者用 @目标 内容 直接指定 agent（/ls 查看）。",
             o => outcome = o, cancellationToken).ConfigureAwait(false);
         if (outcome is { Ok: true })
@@ -1038,12 +1074,17 @@ public sealed class ChatDispatcher(
     }
 
     /// <summary>
-    /// <c>/at</c>：算出执行时间（按主人的时区），存进状态文件，由 <see cref="Scheduler"/> 到点执行。
-    /// <c>@序号</c> 在这里就换成 <c>@设备/名字</c>：到点时的 <c>/ls</c> 序号可能已经变了。
+    /// <c>/at</c>：算出执行时间（按主人的时区），现在就定下发给哪台设备的哪个 agent，存进状态文件，由 <see cref="Scheduler"/> 到点执行。
+    /// <c>@目标</c> 现在就解析成设备和 agent 名字（到点时 <c>/ls</c> 序号可能变了、别的电脑上可能有同名的）；
+    /// 交给管家的文字现在就定下是哪台设备的管家（到点时默认设备可能换了）。没名字的 agent 不能定时：
+    /// pane 编号在 agent 退出后可能换给别的程序，名字会随 agent 退出清掉，用名字找不到也不会发错。
     /// </summary>
     /// <param name="command">解析好的指令。</param>
-    /// <param name="cancellationToken">取消等待（解析序号时要问节点）。</param>
-    /// <returns>编号、执行时间和取消方法；已经有 <see cref="MaxScheduledJobs"/> 个或序号解析不了时是原因。</returns>
+    /// <param name="cancellationToken">取消等待（解析目标时要问节点）。</param>
+    /// <returns>
+    /// 编号、执行时间、发给谁和取消方法；已经有 <see cref="MaxScheduledJobs"/> 个、目标现在找不到、agent 没有名字、
+    /// 没有可用的默认设备时是原因。
+    /// </returns>
     private async Task<string> ScheduleAsync(ChatAt command, CancellationToken cancellationToken)
     {
         if (store.Read(s => s.ScheduledJobs.Count) >= MaxScheduledJobs)
@@ -1051,16 +1092,45 @@ public sealed class ChatDispatcher(
             return $"❓ 定时任务最多 {MaxScheduledJobs} 个，先用 /at del 编号 取消一些";
         }
 
-        var text = command.Text;
-        if (ChatCommandParser.Parse(text) is ChatPrompt { Target.IsIndex: true } prompt)
+        DeviceRecord device;
+        string target, prompt, text;
+        var butler = false;
+        switch (ChatCommandParser.Parse(command.Text))
         {
-            var (resolved, error) = await ResolveAsync(prompt.Target, cancellationToken).ConfigureAwait(false);
-            if (resolved is null)
+            case ChatPrompt agentPrompt:
             {
-                return "❓ " + error;
+                var (resolved, error) = await FindAsync(agentPrompt.Target, cancellationToken).ConfigureAwait(false);
+                if (resolved is null)
+                {
+                    return $"❓ {error}\n（定时任务在创建时就要找到目标）";
+                }
+
+                if (resolved.Agent.Name is not { } name)
+                {
+                    return $"❓ {resolved.Label} 没有名字，不能定时派活：它的 pane 编号以后可能换给别的程序。" +
+                        $"先用 /name {resolved.Address} 新名字 给它起个名字，再用名字定时";
+                }
+
+                (device, target, prompt) = (resolved.Device, name, agentPrompt.Text);
+                text = $"@{device.Name}/{name} {prompt}";
+                break;
             }
 
-            text = $"@{resolved.Address} {prompt.Text}";
+            case ChatButlerPrompt butlerPrompt:
+            {
+                var (selected, error) = DefaultDevice();
+                if (selected is null)
+                {
+                    return $"❓ {error}\n（定时交给管家时，现在就要定下是哪台设备的管家）";
+                }
+
+                (device, target, prompt, butler) = (selected, ButlerName, butlerPrompt.Text, true);
+                text = $"[{device.Name}] 的管家：{prompt}";
+                break;
+            }
+
+            default:
+                return "❓ 定时任务的内容只能是 @目标 内容，或者交给管家的文字";
         }
 
         var due = DueTime(command.When);
@@ -1068,9 +1138,42 @@ public sealed class ChatDispatcher(
         store.Update(state =>
         {
             id = state.NextJobId++;
-            state.ScheduledJobs.Add(new ScheduledJob(id, due, text, clock.UtcNow));
+            state.ScheduledJobs.Add(new ScheduledJob(id, due, text, clock.UtcNow, device.Id, target, prompt, butler));
         });
         return $"⏰ 好的，定时任务 #{id} 会在 {clock.Format(due)}（{clock.OffsetLabel(due)}，{ReplyFormatter.Duration(due - clock.UtcNow)}后）执行：\n{TextChunker.Truncate(text, 200)}\n\n取消用 /at del {id}";
+    }
+
+    /// <summary>
+    /// 执行一个定时任务：发给创建时定下的设备和 agent，不带暂存的图片，不改变不写目标时的默认 agent，
+    /// 它的结果也不会（见 <see cref="ConversationState"/>）。
+    /// </summary>
+    /// <param name="job">取走的任务。</param>
+    /// <param name="cancellationToken">取消等待。</param>
+    /// <returns>执行结果；升级前创建的任务、设备已撤销或离线、找不到 agent 时是没有执行的原因。</returns>
+    private async Task<string> RunJobAsync(ScheduledJob job, CancellationToken cancellationToken)
+    {
+        if (job.DeviceId is null || job.Target is null || job.Prompt is null)
+        {
+            return "❓ 这个定时任务是升级前创建的，没有记下要发给哪台设备的哪个 agent，为了不发错地方没有执行。需要的话请重新创建";
+        }
+
+        if (store.FindDevice(job.DeviceId) is not { } device)
+        {
+            return "❌ 它要发去的设备已经撤销了，没有执行";
+        }
+
+        if (!hub.IsOnline(device.Id))
+        {
+            return $"❌ 设备 {device.Name} 离线，没有执行";
+        }
+
+        var label = job.Butler ? $"[{device.Name}] 的管家" : $"[{device.Name}] {job.Target}";
+        var notFound = job.Butler
+            ? $"🤖 [{device.Name}] 还没有管家，没有执行。发 /butler 创建一个"
+            : $"❌ [{device.Name}] 上找不到 {job.Target}（可能已经关掉或改名了），没有执行";
+        return await SendTextAsync(
+            device, job.Target, job.Prompt, withImages: false, label, (job.Butler ? "已交给 " : "已发给 ") + label, notFound,
+            observe: null, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>执行时间（UTC）：相对时长直接加；时刻按主人的时区算，今天已经过了（或者写了"明天"）就是明天。</summary>
@@ -1103,14 +1206,17 @@ public sealed class ChatDispatcher(
         return new DateTimeOffset(candidate, clock.Zone.GetUtcOffset(candidate)).ToUniversalTime();
     }
 
-    /// <summary><c>/at del 编号</c>：取消定时任务。</summary>
+    /// <summary>
+    /// <c>/at del 编号</c>：取消定时任务。和到点执行在同一个排队区段里（见 <see cref="TakeScheduledJobAsync"/>），
+    /// 回复"已取消"的任务一定不会再执行。
+    /// </summary>
     /// <param name="id">任务编号。</param>
-    /// <returns>取消结果；没有这个编号时是提示。</returns>
+    /// <returns>取消结果；没有这个编号（可能刚刚已经到点执行了）时是提示。</returns>
     private string CancelJob(int id)
     {
         var removed = false;
         store.Update(state => removed = state.ScheduledJobs.RemoveAll(j => j.Id == id) > 0);
-        return removed ? $"🗑 已取消定时任务 #{id}" : $"❓ 没有定时任务 #{id}，发 /at 查看";
+        return removed ? $"🗑 已取消定时任务 #{id}" : $"❓ 没有定时任务 #{id}（可能已经到点执行了），发 /at 查看";
     }
 
     /// <summary>

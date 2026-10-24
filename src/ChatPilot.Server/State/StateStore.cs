@@ -28,12 +28,27 @@ public sealed class ServerState
     public long? TelegramOffset { get; set; }
 }
 
-/// <summary>一个定时任务：到点后像主人刚发了这条消息一样执行。</summary>
+/// <summary>
+/// 一个定时任务：到点后把 <see cref="Prompt"/> 发给 <see cref="DeviceId"/> 上的 <see cref="Target"/>。
+/// 设备和 agent 在创建时就定下来，不会因为到点时默认设备换了、别的电脑上有同名 agent 而发错地方。
+/// </summary>
 /// <param name="Id">编号，<c>/at del 编号</c> 取消时用。</param>
 /// <param name="DueAt">执行时间（UTC）。</param>
-/// <param name="Text">到点要执行的消息（<c>@设备/目标 内容</c> 或交给管家的文字）。</param>
+/// <param name="Text">给主人看的内容，例如 <c>@mac/tideq 跑测试</c>、<c>[mac] 的管家：整理日报</c>。</param>
 /// <param name="CreatedAt">创建时间。</param>
-public sealed record ScheduledJob(int Id, DateTimeOffset DueAt, string Text, DateTimeOffset CreatedAt);
+/// <param name="DeviceId">发给哪台设备；升级前创建的任务没有记下，为 null，到点时不执行。</param>
+/// <param name="Target">发给哪个 agent（agent 名字；交给管家时是 <c>butler</c>）。</param>
+/// <param name="Prompt">发给它的文字。</param>
+/// <param name="Butler">是不是交给管家的文字（只影响回复的说法）。</param>
+public sealed record ScheduledJob(
+    int Id,
+    DateTimeOffset DueAt,
+    string Text,
+    DateTimeOffset CreatedAt,
+    string? DeviceId = null,
+    string? Target = null,
+    string? Prompt = null,
+    bool Butler = false);
 
 /// <summary>微信绑定信息。<see cref="OwnerUserId"/> 是扫码的微信号，也是唯一能下指令的人。</summary>
 public sealed class WeChatAccount

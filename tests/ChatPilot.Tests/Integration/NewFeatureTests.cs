@@ -425,14 +425,22 @@ public sealed class ScheduleTests : IAsyncLifetime
     [Fact]
     public async Task Clock_times_use_the_owner_time_zone_and_jobs_can_be_listed_and_cancelled()
     {
+        var herdr = new FakeHerdr();
+        herdr.AddAgent("tideq", "TideQ");
+        await using var node = await NodeHarness.PairAndStartAsync(_factory, "mac", herdr);
+
         // 现在是北京时间 18:00：23:00 是今天，8:00 是明天。
         var tonight = await DevChat.SendAsync(_chat, "/at 23:00 @mac/tideq 跑全量测试");
         Assert.StartsWith("⏰ 好的，定时任务 #1 会在 10-23 23:00（UTC+08:00，5 小时后）执行", tonight, StringComparison.Ordinal);
-        Assert.Contains("#2 会在 10-24 08:00", await DevChat.SendAsync(_chat, "/at 8:00 整理日报"), StringComparison.Ordinal);
-        Assert.Contains("#3 会在 10-24 23:00", await DevChat.SendAsync(_chat, "/at 明天 23:00 @x y"), StringComparison.Ordinal);
+        var butler = await DevChat.SendAsync(_chat, "/at 8:00 整理日报");
+        Assert.Contains("#2 会在 10-24 08:00", butler, StringComparison.Ordinal);
+        Assert.Contains("[mac] 的管家：整理日报", butler, StringComparison.Ordinal);
+        Assert.Contains("#3 会在 10-24 23:00", await DevChat.SendAsync(_chat, "/at 明天 23:00 @tideq y"), StringComparison.Ordinal);
+        Assert.StartsWith("❓ 找不到 nobody", await DevChat.SendAsync(_chat, "/at 30m @nobody y"), StringComparison.Ordinal);
 
         var list = await DevChat.SendAsync(_chat, "/at");
         Assert.Contains("#1 10-23 23:00\n  @mac/tideq 跑全量测试", list, StringComparison.Ordinal);
+        Assert.Contains("#3 10-24 23:00\n  @mac/tideq y", list, StringComparison.Ordinal);
         Assert.True(list.IndexOf("#1", StringComparison.Ordinal) < list.IndexOf("#2", StringComparison.Ordinal));
         Assert.Equal("🗑 已取消定时任务 #1", await DevChat.SendAsync(_chat, "/at del 1"));
         Assert.StartsWith("❓ 没有定时任务 #1", await DevChat.SendAsync(_chat, "/at del 1"), StringComparison.Ordinal);
@@ -468,6 +476,68 @@ public sealed class ScheduleTests : IAsyncLifetime
         Assert.Contains("已经错过，没有执行", await DevChat.WaitForEventAsync(_chat, e => e.StartsWith("⏰ 定时任务 #2", StringComparison.Ordinal)), StringComparison.Ordinal);
         Assert.Single(herdr.CallsStartingWith("agent", "prompt"));
         Assert.StartsWith("⏰ 没有定时任务", await DevChat.SendAsync(_chat, "/at"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Jobs_go_to_the_device_and_agent_chosen_when_they_were_created()
+    {
+        // 审查 #6：创建时默认设备是 mac、只有 mac 上有 tideq；到点前切到 win、win 上也有了 tideq，任务还是发给 mac。
+        var mac = new FakeHerdr();
+        var macButler = mac.AddAgent("butler", "Butler");
+        var macTideq = mac.AddAgent("tideq", "TideQ");
+        mac.AddAgent(null, "Scratch");
+        await using var macNode = await NodeHarness.PairAndStartAsync(_factory, "mac", mac);
+        await DevChat.SendAsync(_chat, "/use mac");
+        await DevChat.SendAsync(_chat, "/at 30m 整理日报");
+        await DevChat.SendAsync(_chat, "/at 30m @tideq 跑测试");
+        Assert.Contains("没有名字，不能定时派活", await DevChat.SendAsync(_chat, "/at 30m @Scratch 看看"), StringComparison.Ordinal);
+
+        var win = new FakeHerdr();
+        win.AddAgent("butler", "Butler");
+        win.AddAgent("tideq", "TideQ");
+        await using var winNode = await NodeHarness.PairAndStartAsync(_factory, "win", win);
+        await DevChat.SendAsync(_chat, "/use win");
+        await DevChat.SendAsync(_chat, "/read win/tideq");
+
+        _time.Advance(TimeSpan.FromMinutes(31));
+        await Scheduler().RunDueAsync(CancellationToken.None);
+        var seen = new List<string>();
+        await DevChat.WaitForEventAsync(_chat, e =>
+        {
+            seen.Add(e);
+            return seen.Count(s => s.StartsWith("⏰ 定时任务", StringComparison.Ordinal)) == 2 && seen.Any(s => s.StartsWith("✅ [mac] tideq", StringComparison.Ordinal));
+        });
+
+        var prompts = mac.CallsStartingWith("agent", "prompt");
+        Assert.Contains(prompts, c => c[2] == macButler.PaneId && c[3] == "整理日报");
+        Assert.Contains(prompts, c => c[2] == macTideq.PaneId && c[3] == "跑测试");
+        Assert.Empty(win.CallsStartingWith("agent", "prompt"));
+
+        // 定时任务和它的结果都不改变不写目标时的默认 agent（审查 #2）。
+        Assert.StartsWith("💬 [win] tideq", await DevChat.SendAsync(_chat, "/last"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_job_reported_as_cancelled_never_runs()
+    {
+        // 审查 #7：/at del 排在一条慢指令后面时，到点的任务也要排队，不能先被取走、再在 /at del 之后执行。
+        var herdr = new FakeHerdr();
+        herdr.AddAgent("tideq", "TideQ");
+        await using var node = await NodeHarness.PairAndStartAsync(_factory, "mac", herdr);
+        await DevChat.SendAsync(_chat, "/at 30m @tideq 不该执行");
+        herdr.CommandDelay = TimeSpan.FromSeconds(1);
+
+        // 慢指令占着队列，/at del 排在它后面；这时任务到点（后台的定时检查也会醒来）。
+        var dispatcher = _factory.Services.GetRequiredService<ChatDispatcher>();
+        var slow = dispatcher.HandleAsync("/ls", CancellationToken.None);
+        var cancel = dispatcher.HandleAsync("/at del 1", CancellationToken.None);
+        _time.Advance(TimeSpan.FromMinutes(31));
+        var due = Scheduler().RunDueAsync(CancellationToken.None);
+        await Task.WhenAll(slow, cancel, due);
+
+        Assert.Equal("🗑 已取消定时任务 #1", await cancel);
+        herdr.CommandDelay = TimeSpan.Zero;
+        Assert.Empty(herdr.CallsStartingWith("agent", "prompt"));
     }
 
     private Scheduler Scheduler() => _factory.Services.GetServices<IHostedService>().OfType<Scheduler>().Single();

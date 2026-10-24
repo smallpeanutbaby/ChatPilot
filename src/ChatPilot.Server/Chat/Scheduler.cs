@@ -4,11 +4,12 @@ using ChatPilot.Shared.Text;
 namespace ChatPilot.Server.Chat;
 
 /// <summary>
-/// 执行 <c>/at</c> 定时任务：每隔几秒看一次状态文件里有没有到点的任务，到点就像主人刚发了这条消息一样执行，结果作为通知推送。
+/// 执行 <c>/at</c> 定时任务：每隔几秒看一次状态文件里有没有到点的任务，到点就发给创建时定下的设备和 agent，结果作为通知推送。
 /// </summary>
 /// <remarks>
 /// <list type="bullet">
 /// <item>先从状态文件里删掉再执行：执行到一半服务器崩溃，重启后不会再执行一次（宁可漏，不重复派活）。</item>
+/// <item>删掉和执行都在指令分发器的排队区段里（<see cref="ChatDispatcher.TakeScheduledJobAsync"/>），和 <c>/at del</c> 互斥。</item>
 /// <item>服务器停机错过的任务：晚了不到 <see cref="MissedGrace"/> 照常执行，更晚的不执行，只通知主人。</item>
 /// </list>
 /// </remarks>
@@ -62,26 +63,25 @@ public sealed class Scheduler(
     {
         var now = time.GetUtcNow();
         var due = store.Read(s => s.ScheduledJobs.Where(j => j.DueAt <= now).OrderBy(j => j.DueAt).ToList());
-        foreach (var job in due)
+        foreach (var candidate in due)
         {
-            var removed = false;
-            store.Update(state => removed = state.ScheduledJobs.RemoveAll(j => j.Id == job.Id) > 0);
-            if (!removed)
+            var missed = now - candidate.DueAt > MissedGrace;
+            var (job, reply) = await dispatcher.TakeScheduledJobAsync(candidate.Id, execute: !missed, cancellationToken).ConfigureAwait(false);
+            if (job is null)
             {
                 // 刚被 /at del 取消了。
                 continue;
             }
 
             var summary = TextChunker.Truncate(job.Text.ReplaceLineEndings(" "), 80);
-            if (now - job.DueAt > MissedGrace)
+            if (missed)
             {
                 logger.LogWarning("定时任务 #{Id} 错过了执行时间，不再执行", job.Id);
                 notifier.Enqueue($"⏰ 定时任务 #{job.Id} 原定 {clock.Format(job.DueAt)} 执行，那时服务器没在运行，已经错过，没有执行：\n{summary}");
                 continue;
             }
 
-            logger.LogInformation("执行定时任务 #{Id}", job.Id);
-            var reply = await dispatcher.HandleScheduledAsync(job.Text, cancellationToken).ConfigureAwait(false);
+            logger.LogInformation("执行了定时任务 #{Id}", job.Id);
             notifier.Enqueue($"⏰ 定时任务 #{job.Id} 到点了：{summary}\n\n{reply}");
         }
     }

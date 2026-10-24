@@ -68,7 +68,7 @@ Telegram ──(HTTPS)──────►├ 服务器 ◄──(TLS + 指纹)
 | 编号 | 措施 | 实现位置 | 测试 |
 |---|---|---|---|
 | S-11 | WebSocket 单条消息 1 MiB、发给 agent 的文字 16 KB、读取行数 1–500、按键一次最多 20 个、HTTP 请求体 64 KB；图片单张 10 MB、暂存最多 4 张 | `WebSocketMessaging`、`ProtocolInfo`、`MediaStore` | `Oversized_frames_close_the_connection`、`Oversized_prompt_is_rejected` |
-| — | 排队的指令每个 agent 最多 10 条、全部最多 50 条，排太久（超过任务等待上限）的丢弃并通知；盯梢只在有盯着的 agent 时才调用 herdr；定时任务最多 20 个，先从状态文件删掉再执行（崩溃后不会重复执行），服务器停机错过超过 10 分钟的不再执行、只通知 | `PromptQueue`、`AgentWatcher`、`Scheduler` | `QueueAndWatchTests`、`Due_jobs_run_like_a_message_and_missed_ones_are_reported` |
+| — | 排队的指令每个 agent 最多 10 条、全部最多 50 条，排太久（超过任务等待上限）的丢弃并通知；盯梢只在有盯着的 agent 时才调用 herdr；定时任务最多 20 个，先从状态文件删掉再执行（崩溃后不会重复执行），删除和执行跟 `/at del` 在同一个排队区段里（回复已取消的不会再执行），服务器停机错过超过 10 分钟的不再执行、只通知 | `PromptQueue`、`AgentWatcher`、`Scheduler`、`ChatDispatcher.TakeScheduledJobAsync` | `QueueAndWatchTests`、`Due_jobs_run_like_a_message_and_missed_ones_are_reported`、`A_job_reported_as_cancelled_never_runs` |
 | — | 节点同时跟踪的任务最多 32 个，每个 agent 只有一个后台等待；每台设备的通知每分钟最多 20 条，通知按顺序排队发送 | `PromptTracker`、`DeviceHub`、`Notifier` | `One_watcher_per_agent…`、`Device_events_are_rate_limited_per_minute` |
 | — | 同一份配置同时只能运行一个节点（配置旁边的 `node.lock`，进程退出时系统自动释放）：第二个节点最多等 20 秒，等不到就以 0 退出，不会两个节点一起发排队的指令、互相覆盖状态文件。升级重启时先确认旧节点退出了（Windows 上结束 `Stop-ScheduledTask` 留下来的节点进程）。下载升级包时 60 秒没收到数据或总共超过 30 分钟就放弃，不会一直卡住 | `NodeCli.AcquireInstanceLockAsync`、`ExclusiveFileLock`、`ServiceRestarter`、`NodeUpdater` | `SingleInstanceTests`、`Windows_restart_also_stops_the_node_left_behind…`、`Stalled_download_gives_up_instead_of_hanging` |
 | — | 每条指令有总时间预算，保证在服务器放弃等待前结束；启动失败（包括超时、断线）一定关掉半启动的工作区 | `CommandExecutor` | `Failed_start_closes_the_new_workspace` |
@@ -100,4 +100,4 @@ Telegram ──(HTTPS)──────►├ 服务器 ◄──(TLS + 指纹)
 | 证书指纹以明文出现在微信里 | 指纹本身不是秘密，只用来防中间人 | 无需处理 |
 | `/diff` 会运行仓库配置的 clean 过滤器 | git 没有关掉过滤器的开关：`.git/config` 里配了 `filter.*.clean` / `process`、并且属性文件把文件指向它时，`git status` / `git diff` 会运行它，和你自己在这个目录里运行 `git status` 完全一样。这些配置只能由能写这台电脑的人（包括 agent 自己）设置，服务器和手机改不了 | 不要对来历不明的仓库用 `/diff`；agent 本身能执行命令，这不是新增的能力 |
 | Telegram bot token 泄露 | 拿到 token 的人能冒充机器人给你发消息，也能抢先调用 getUpdates 把你发的指令收走（导致指令没执行）；但伪造不了"主人发来的消息"，所以不能借此控制电脑 | token 用环境变量配置；怀疑泄露时在 @BotFather 里 /revoke 换一个 |
-| 盯梢和定时任务扩大了"自动"范围 | 盯梢只发通知、不按键；定时任务到点执行的是主人自己写好的那条消息，和当场发送一样 | `/at` 查看、`/at del` 取消；不需要时 `/unwatch all` |
+| 盯梢和定时任务扩大了"自动"范围 | 盯梢只发通知、不按键；定时任务到点执行的是主人自己写好的那条消息，发给创建时就定下的设备和 agent（名字），不会因为到点时默认设备换了、别处有同名 agent 而发错 | `/at` 查看、`/at del` 取消；不需要时 `/unwatch all` |
