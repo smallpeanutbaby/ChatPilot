@@ -8,7 +8,11 @@ namespace ChatPilot.Node.Herdr;
 /// <param name="ExitCode">退出码。</param>
 /// <param name="StandardOutput">标准输出。</param>
 /// <param name="StandardError">标准错误输出。</param>
-public sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
+public sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError)
+{
+    /// <summary>输出超过上限、只读了前面一部分：这时进程是被结束的，<see cref="ExitCode"/> 没有意义。</summary>
+    public bool Truncated { get; init; }
+}
 
 /// <summary>进程启动失败（通常是找不到可执行文件）。</summary>
 /// <param name="message">给用户看的说明，带上了程序名。</param>
@@ -29,15 +33,34 @@ public interface IProcessRunner
     Task<ProcessResult> RunAsync(string fileName, IReadOnlyList<string> arguments, TimeSpan timeout, CancellationToken cancellationToken);
 }
 
-/// <summary>用 <see cref="Process"/> 启动程序：参数数组、无 shell、去掉 herdr 环境变量、超时结束整个进程树。</summary>
+/// <summary>
+/// 用 <see cref="Process"/> 启动程序：参数数组、无 shell、去掉 herdr 环境变量、超时结束整个进程树。
+/// 每路输出最多读 <see cref="DefaultMaxOutputChars"/> 个字符（可以改），超过时结束进程、结果标记为 <see cref="ProcessResult.Truncated"/>，
+/// 不会因为一个巨大的输出（比如几百 MB 文本文件的 git diff）把内存吃光。
+/// </summary>
 public sealed class ProcessRunner : IProcessRunner
 {
+    /// <summary>标准输出、标准错误默认各自最多读多少字符（约 16 MB 内存）；herdr 和 git 正常的输出远小于它。</summary>
+    public const int DefaultMaxOutputChars = 8 * 1024 * 1024;
+
     /// <summary>
     /// herdr 会根据这些环境变量推断"当前 pane"。节点可能是在某个 herdr 终端里启动的，
     /// 去掉它们，保证每次调用都只受显式参数控制。
     /// </summary>
     private static readonly string[] StrippedVariables =
         ["HERDR_ENV", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID", "HERDR_SOCKET_PATH"];
+
+    /// <summary>每路输出最多读多少字符。</summary>
+    private readonly int _maxOutputChars;
+
+    /// <summary>创建执行器。</summary>
+    /// <param name="maxOutputChars">标准输出、标准错误各自最多读多少字符，超过时结束进程；默认 <see cref="DefaultMaxOutputChars"/>。</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxOutputChars"/> 不是正数。</exception>
+    public ProcessRunner(int maxOutputChars = DefaultMaxOutputChars)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxOutputChars);
+        _maxOutputChars = maxOutputChars;
+    }
 
     /// <inheritdoc />
     public async Task<ProcessResult> RunAsync(string fileName, IReadOnlyList<string> arguments, TimeSpan timeout, CancellationToken cancellationToken)
@@ -74,8 +97,8 @@ public sealed class ProcessRunner : IProcessRunner
         }
 
         process.StandardInput.Close();
-        var stdout = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
-        var stderr = process.StandardError.ReadToEndAsync(CancellationToken.None);
+        var stdout = ReadBoundedAsync(process.StandardOutput, process);
+        var stderr = ReadBoundedAsync(process.StandardError, process);
 
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(timeout);
@@ -85,7 +108,10 @@ public sealed class ProcessRunner : IProcessRunner
 
             // 进程退出后如果留下了继承输出管道的后台进程，管道不会关闭；读输出也必须在截止时间内完成。
             var output = await Task.WhenAll(stdout, stderr).WaitAsync(deadline.Token).ConfigureAwait(false);
-            return new ProcessResult(process.ExitCode, output[0], output[1]);
+            return new ProcessResult(process.ExitCode, output[0].Text, output[1].Text)
+            {
+                Truncated = output[0].Truncated || output[1].Truncated,
+            };
         }
         catch (OperationCanceledException)
         {
@@ -93,6 +119,30 @@ public sealed class ProcessRunner : IProcessRunner
             cancellationToken.ThrowIfCancellationRequested();
             throw new TimeoutException($"{fileName} 运行超过 {timeout.TotalSeconds:0} 秒，已结束");
         }
+    }
+
+    /// <summary>读一路输出，最多 <see cref="_maxOutputChars"/> 个字符；超过时结束整个进程树、不再往下读。</summary>
+    /// <param name="reader">进程的标准输出或标准错误。</param>
+    /// <param name="process">输出太多时要结束的进程。</param>
+    /// <returns>读到的文字，以及是不是因为超过上限而截断了。</returns>
+    private async Task<(string Text, bool Truncated)> ReadBoundedAsync(StreamReader reader, Process process)
+    {
+        var builder = new StringBuilder();
+        var buffer = new char[8192];
+        int read;
+        while ((read = await reader.ReadAsync(buffer.AsMemory(), CancellationToken.None).ConfigureAwait(false)) > 0)
+        {
+            if (builder.Length + read > _maxOutputChars)
+            {
+                builder.Append(buffer, 0, _maxOutputChars - builder.Length);
+                Kill(process);
+                return (builder.ToString(), true);
+            }
+
+            builder.Append(buffer, 0, read);
+        }
+
+        return (builder.ToString(), false);
     }
 
     /// <summary>结束整个进程树；进程已经退出时忽略。</summary>

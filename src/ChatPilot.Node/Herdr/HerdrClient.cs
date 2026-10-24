@@ -319,8 +319,8 @@ public sealed class HerdrClient(IProcessRunner runner, string herdrPath, string?
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>退出码为 0 的运行结果。</returns>
     /// <exception cref="HerdrException">
-    /// 启动不了（<c>herdr_unavailable</c>）、超时（<c>timeout</c>）、herdr 返回的 JSON 错误（它自己的错误码），
-    /// 或退出码不为 0 又没有 JSON 错误（<c>herdr_error</c>）。
+    /// 启动不了（<c>herdr_unavailable</c>）、超时（<c>timeout</c>）、输出太长没读完（<c>output_too_large</c>）、
+    /// herdr 返回的 JSON 错误（它自己的错误码），或退出码不为 0 又没有 JSON 错误（<c>herdr_error</c>）。
     /// </exception>
     private async Task<ProcessResult> RunAsync(IEnumerable<string> args, TimeSpan timeout, CancellationToken cancellationToken)
     {
@@ -336,6 +336,12 @@ public sealed class HerdrClient(IProcessRunner runner, string herdrPath, string?
         catch (TimeoutException)
         {
             throw new HerdrException("timeout", $"herdr 调用超时（{timeout.TotalSeconds:0} 秒）");
+        }
+
+        if (result.Truncated)
+        {
+            // 只读到前面一部分：JSON 不完整，终端内容也缺了结尾，不能当成正常结果。
+            throw new HerdrException("output_too_large", "herdr 的输出太长，没有读完，已放弃");
         }
 
         if (result.ExitCode == 0)

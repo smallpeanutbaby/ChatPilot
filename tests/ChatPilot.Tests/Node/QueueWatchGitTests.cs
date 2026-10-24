@@ -525,6 +525,126 @@ public sealed class GitInspectorTests : IDisposable
         Assert.Contains("找不到 git", ex.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Repository_config_cannot_make_git_log_run_a_signature_program()
+    {
+        // 审查：log.showSignature 配上 gpg.program，git log 遇到签名的提交就会运行那个程序。
+        if (!Git("init", "-q", "-b", "main"))
+        {
+            return;
+        }
+
+        File.WriteAllText(_repo.Combine("a.txt"), "x\n");
+        Git("add", "a.txt");
+        Git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "第一次提交");
+        using var tools = new TempDirectory();
+        var marker = tools.Combine("ran");
+        Git("config", "log.showSignature", "true");
+        Git("config", "gpg.program", MarkerScript(tools, marker));
+        var commit = tools.Combine("commit.txt");
+        File.WriteAllText(commit,
+            $"tree {GitOutput("rev-parse", "HEAD^{tree}")}\nparent {GitOutput("rev-parse", "HEAD")}\n"
+            + "author t <t@example.com> 1700000000 +0000\ncommitter t <t@example.com> 1700000000 +0000\n"
+            + "gpgsig -----BEGIN PGP SIGNATURE-----\n \n abc\n -----END PGP SIGNATURE-----\n\n签名的提交\n");
+        Git("update-ref", "HEAD", GitOutput("hash-object", "-t", "commit", "-w", commit));
+
+        // 先确认这里的 git 真的会运行它，否则这个测试说明不了什么。
+        Git("log", "-1", "--format=%s");
+        if (!File.Exists(marker))
+        {
+            return;
+        }
+
+        File.Delete(marker);
+        Assert.Contains("签名的提交", await _git.SummaryAsync(_repo.Path, CancellationToken.None), StringComparison.Ordinal);
+        Assert.False(File.Exists(marker));
+    }
+
+    [Fact]
+    public async Task Repository_config_cannot_make_git_diff_run_a_program_inside_a_submodule()
+    {
+        // 审查：diff.submodule=diff 让 git 在子模块里再跑一次 diff，那次不带 --no-ext-diff，会运行子模块配置的 diff.external。
+        if (!Git("init", "-q", "-b", "main"))
+        {
+            return;
+        }
+
+        using var sub = new TempDirectory();
+        using var tools = new TempDirectory();
+        Git("-C", sub.Path, "init", "-q", "-b", "main");
+        File.WriteAllText(sub.Combine("f.txt"), "旧\n");
+        Git("-C", sub.Path, "add", "f.txt");
+        Git("-C", sub.Path, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "子模块");
+        if (!Git("-c", "protocol.file.allow=always", "submodule", "add", "-q", sub.Path.Replace('\\', '/'), "sub"))
+        {
+            return;
+        }
+
+        Git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "加子模块");
+        var marker = tools.Combine("ran");
+        Git("config", "diff.submodule", "diff");
+        Git("-C", "sub", "config", "diff.external", MarkerScript(tools, marker));
+        File.WriteAllText(_repo.Combine("sub", "f.txt"), "新\n");
+
+        Git("diff", "HEAD", "--no-ext-diff", "--", "sub");
+        if (!File.Exists(marker))
+        {
+            return;
+        }
+
+        File.Delete(marker);
+        await _git.FileDiffAsync(_repo.Path, "sub", CancellationToken.None);
+        await _git.SummaryAsync(_repo.Path, CancellationToken.None);
+        Assert.False(File.Exists(marker));
+    }
+
+    [Fact]
+    public async Task A_huge_diff_is_cut_off_instead_of_read_into_memory()
+    {
+        // 审查：几百 MB 的文本文件改了，git diff 的输出不能整个读进内存再截短。
+        if (!Git("init", "-q", "-b", "main"))
+        {
+            return;
+        }
+
+        File.WriteAllText(_repo.Combine("big.txt"), "旧\n");
+        Git("add", "big.txt");
+        Git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "第一次提交");
+        File.WriteAllText(_repo.Combine("big.txt"), string.Concat(Enumerable.Repeat("新加的一行，内容很长很长很长很长很长很长\n", 20_000)));
+
+        var git = new GitInspector(new ProcessRunner(maxOutputChars: 50_000), "git", TimeSpan.FromSeconds(20));
+        var diff = await git.FileDiffAsync(_repo.Path, "big.txt", CancellationToken.None);
+        Assert.EndsWith("（输出太长，后面的截断了）", diff, StringComparison.Ordinal);
+        Assert.True(diff.Length <= GitInspector.MaxChars);
+    }
+
+    /// <summary>写一个被运行时留下标记文件的脚本，返回 git 配置里能用的路径。</summary>
+    private static string MarkerScript(TempDirectory tools, string marker)
+    {
+        var path = tools.Combine("marker.sh");
+        File.WriteAllText(path, $"#!/bin/sh\necho ran > '{marker.Replace('\\', '/')}'\nexit 1\n");
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        return path.Replace('\\', '/');
+    }
+
+    private string GitOutput(params string[] args)
+    {
+        var info = new ProcessStartInfo("git") { WorkingDirectory = _repo.Path, RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (var arg in args)
+        {
+            info.ArgumentList.Add(arg);
+        }
+
+        using var process = Process.Start(info)!;
+        var output = process.StandardOutput.ReadToEnd();
+        process.WaitForExit(20_000);
+        return output.Trim();
+    }
+
     private bool Git(params string[] args)
     {
         try
