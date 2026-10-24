@@ -68,6 +68,15 @@ public static class ReplyFormatter
         };
     }
 
+    /// <summary>给人看的时长：不到 1 分钟、N 分钟、N 小时、N 天。</summary>
+    public static string Duration(TimeSpan span) => span switch
+    {
+        { TotalMinutes: < 1 } => "不到 1 分钟",
+        { TotalHours: < 1 } => $"{(int)span.TotalMinutes} 分钟",
+        { TotalDays: < 1 } => $"{(int)span.TotalHours} 小时",
+        _ => $"{(int)span.TotalDays} 天",
+    };
+
     /// <summary><c>/last</c> 的回复：和做完时的通知用同样的长度上限。</summary>
     public static string LastReply(string label, string text) =>
         $"💬 {label} 最近的回复：\n\n{TextChunker.Truncate(text, MaxEventTextChars)}";

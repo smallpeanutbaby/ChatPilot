@@ -63,6 +63,9 @@ public sealed record DeviceRecord
 
     /// <summary>最后一次上线或下线的时间。</summary>
     public DateTimeOffset? LastSeenAt { get; init; }
+
+    /// <summary>已经通知过主人"这台设备离线了"、还没通知"恢复"。</summary>
+    public bool OfflineNotified { get; init; }
 }
 
 /// <summary>

@@ -22,9 +22,10 @@ public sealed record DeviceSession(string DeviceId, string HostName, string Plat
 /// <list type="bullet">
 /// <item>同一台设备再次连接时，新连接替换旧连接（旧连接收到 <see cref="CloseReasons.Replaced"/>）。</item>
 /// <item>设备上报的事件按顺序排队转发，每台设备每分钟最多 <see cref="MaxEventsPerMinute"/> 条，防止刷屏。</item>
+/// <item>上线、真正下线（不是被新连接替换）时告诉 <see cref="PresenceNotifier"/>，由它决定要不要通知主人。</item>
 /// </list>
 /// </remarks>
-public sealed class DeviceHub(StateStore store, Notifier notifier, TimeProvider time, ILogger<DeviceHub> logger)
+public sealed class DeviceHub(StateStore store, Notifier notifier, PresenceNotifier presence, TimeProvider time, ILogger<DeviceHub> logger)
 {
     /// <summary>每台设备每分钟最多转发的事件数。</summary>
     internal const int MaxEventsPerMinute = 20;
@@ -120,6 +121,7 @@ public sealed class DeviceHub(StateStore store, Notifier notifier, TimeProvider 
             return;
         }
 
+        presence.Connected(device);
         TouchLastSeen(device.Id);
         logger.LogInformation("设备 {Device} 上线（{Host}，{Platform}）", device.Name, session.HostName, session.Platform);
 
@@ -132,7 +134,11 @@ public sealed class DeviceHub(StateStore store, Notifier notifier, TimeProvider 
             connection.FailPending();
             _connections.TryRemove(new KeyValuePair<string, NodeConnection>(device.Id, connection));
             TouchLastSeen(device.Id);
-            logger.LogInformation("设备 {Device} 下线", device.Name);
+            presence.Disconnected(device);
+            if (!IsOnline(device.Id))
+            {
+                logger.LogInformation("设备 {Device} 下线", device.Name);
+            }
         }
     }
 

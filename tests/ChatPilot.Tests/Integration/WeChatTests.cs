@@ -346,7 +346,8 @@ public sealed class WeChatChannelTests : IDisposable
         var client = new ILinkClient(new HttpClient(ilink), options);
         var registry = new ChatChannelRegistry();
         var notifier = new Notifier(registry, NullLogger<Notifier>.Instance);
-        var hub = new DeviceHub(store, notifier, time, NullLogger<DeviceHub>.Instance);
+        var presence = new PresenceNotifier(store, notifier, time, options, NullLogger<PresenceNotifier>.Instance);
+        var hub = new DeviceHub(store, notifier, presence, time, NullLogger<DeviceHub>.Instance);
         var certificates = new CertificateProvider(options, NullLogger<CertificateProvider>.Instance);
         var dispatcher = new ChatDispatcher(hub, store, new PairingService(store, time, options), new ServerIdentity(options, certificates), options, NullLogger<ChatDispatcher>.Instance);
         var login = new WeChatLogin(client, store, options, time, NullLogger<WeChatLogin>.Instance);
