@@ -169,14 +169,25 @@ public static class NodeCli
     }
 
     /// <summary>
-    /// <c>run</c>：组装 herdr 客户端、任务跟踪、盯着 agent 的 watcher、附件下载和指令执行，然后连上服务器一直运行，
-    /// 直到收到 SIGINT / SIGTERM、被另一个实例替换或设备令牌被拒绝。Windows 上启动时顺便清掉升级留下的旧程序。
+    /// 另一个节点拿着这个配置的锁时，最多等它多久。升级重启时旧进程可能还差一点才完全退出；
+    /// 等不到就说明真的有另一个节点在运行。测试里改短。
+    /// </summary>
+    internal static TimeSpan InstanceLockWait { get; set; } = TimeSpan.FromSeconds(20);
+
+    /// <summary>
+    /// <c>run</c>：先拿这个配置的单实例锁，再组装 herdr 客户端、任务跟踪、盯着 agent 的 watcher、附件下载和指令执行，
+    /// 然后连上服务器一直运行，直到收到 SIGINT / SIGTERM、被另一个实例替换或设备令牌被拒绝。
+    /// Windows 上启动时顺便清掉升级留下的旧程序。
     /// </summary>
     /// <param name="cli">解析好的命令行。</param>
-    /// <param name="configPath">配置文件路径；任务记录、排队指令和附件都存在它旁边。</param>
-    /// <returns>0 正常退出（包括被替换）；1 参数有问题；2 设备令牌被拒绝。</returns>
+    /// <param name="configPath">配置文件路径；任务记录、排队指令、锁文件和附件都存在它旁边。</param>
+    /// <returns>
+    /// 0 正常退出（包括被替换、另一个节点一直在用这个配置运行：都以 0 退出，开机自启工具就不会反复把它拉起来）；
+    /// 1 参数有问题；2 设备令牌被拒绝。
+    /// </returns>
     /// <exception cref="FileNotFoundException">还没配对。</exception>
     /// <exception cref="InvalidDataException">配置有问题。</exception>
+    /// <exception cref="UnauthorizedAccessException">没有权限在配置目录里创建锁文件。</exception>
     private static async Task<int> RunNodeAsync(CommandLine cli, string configPath)
     {
         cli.RejectUnknown("config");
@@ -188,14 +199,21 @@ public static class NodeCli
         var config = NodeConfigStore.Load(configPath);
         using var loggerFactory = CreateLoggerFactory();
         var logger = loggerFactory.CreateLogger("ChatPilot.Node");
+        using var stopping = new CancellationTokenSource();
+        using var sigint = PosixSignalRegistration.Create(PosixSignal.SIGINT, Stop);
+        using var sigterm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, Stop);
+
+        // 两个节点用同一份配置会各自读 node.queue.json、各自发排队的指令、互相覆盖状态文件，所以先拿锁再碰这些文件。
+        using var instance = await AcquireInstanceLockAsync(configPath, InstanceLockWait, logger, stopping.Token).ConfigureAwait(false);
+        if (instance is null)
+        {
+            return 0;
+        }
+
         if (OperatingSystem.IsWindows() && Environment.ProcessPath is { } self)
         {
             NodeUpdater.CleanUpOldBinaries(self);
         }
-
-        using var stopping = new CancellationTokenSource();
-        using var sigint = PosixSignalRegistration.Create(PosixSignal.SIGINT, Stop);
-        using var sigterm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, Stop);
 
         var herdr = new HerdrClient(new ProcessRunner(), config.HerdrPath, config.HerdrSession, TimeSpan.FromSeconds(config.CommandTimeoutSeconds));
         var paths = new PathPolicy(config.AllowedRoots);
@@ -237,6 +255,41 @@ public static class NodeCli
         {
             context.Cancel = true;
             stopping.Cancel();
+        }
+    }
+
+    /// <summary>
+    /// 拿这个配置的单实例锁。另一个节点拿着时最多等 <paramref name="wait"/>：升级重启时旧进程可能还没完全退出，
+    /// 等它退出后接手；一直等不到就说明真的有另一个节点在用这个配置运行，这个节点不启动。
+    /// </summary>
+    /// <param name="configPath">配置文件路径；锁文件见 <see cref="NodeConfigStore.LockPathFor"/>。</param>
+    /// <param name="wait">最多等多久。</param>
+    /// <param name="logger">记录在等谁、为什么不启动。</param>
+    /// <param name="cancellationToken">收到退出信号时停止等待。</param>
+    /// <returns>拿到的锁，节点运行期间一直拿着；等不到或在等的时候收到退出信号时为 null。</returns>
+    /// <exception cref="UnauthorizedAccessException">没有权限在配置目录里创建锁文件。</exception>
+    internal static async Task<ExclusiveFileLock?> AcquireInstanceLockAsync(string configPath, TimeSpan wait, ILogger logger, CancellationToken cancellationToken)
+    {
+        var path = NodeConfigStore.LockPathFor(configPath);
+        if (ExclusiveFileLock.TryAcquire(path) is { } acquired)
+        {
+            return acquired;
+        }
+
+        logger.LogWarning("另一个节点正在用这份配置运行（锁文件 {Path}），等它退出，最多等 {Seconds:0} 秒", path, wait.TotalSeconds);
+        try
+        {
+            var waited = await ExclusiveFileLock.AcquireAsync(path, wait, cancellationToken).ConfigureAwait(false);
+            if (waited is null)
+            {
+                logger.LogError("另一个节点一直在用这份配置运行，这个节点不启动。同一份配置同时只能运行一个节点；要重启请先停掉正在运行的那个");
+            }
+
+            return waited;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return null;
         }
     }
 

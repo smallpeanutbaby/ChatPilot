@@ -15,6 +15,14 @@ public static class NodeConfigStore
             ? overridden
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".chatpilot", "node.json");
 
+    /// <summary>
+    /// 节点的单实例锁文件：和配置同名、扩展名换成 <c>.lock</c>（例如 <c>node.lock</c>），
+    /// 和 <c>node.tasks.json</c>、<c>node.queue.json</c> 这些状态文件按同样的规则命名，用同一份状态文件的节点也就用同一把锁。
+    /// </summary>
+    /// <param name="configPath">配置文件路径。</param>
+    /// <returns>锁文件的完整路径。</returns>
+    public static string LockPathFor(string configPath) => Path.ChangeExtension(Path.GetFullPath(configPath), ".lock");
+
     /// <summary>读取并校验配置。</summary>
     /// <param name="path">配置文件路径。</param>
     /// <returns>通过 <see cref="NodeConfig.Validate"/> 校验的配置。</returns>
