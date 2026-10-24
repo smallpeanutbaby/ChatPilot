@@ -245,6 +245,36 @@ public sealed class WeChatChannelTests : IDisposable
     }
 
     [Fact]
+    public async Task Messages_that_arrive_too_late_are_reported_instead_of_run()
+    {
+        // 审查 #3：iLink 的消息带 create_time_ms；晚了超过 10 分钟的不执行，告诉主人。没带时间的照常处理。
+        SeedAccount("buf0");
+        var ilink = new FakeILink();
+        await using var factory = CreateFactory(ilink);
+        using var client = factory.CreateClient();
+        await ilink.Updates.Writer.WriteAsync(new
+        {
+            ret = 0,
+            get_updates_buf = "buf1",
+            msgs = new[]
+            {
+                FakeILink.Message("owner@im.wechat", "/pair 旧的", "c1", sentAt: DateTimeOffset.UtcNow.AddMinutes(-45)),
+                FakeILink.Message("owner@im.wechat", "/help", "c2", sentAt: DateTimeOffset.UtcNow),
+                FakeILink.Message("owner@im.wechat", "/devices", "c3"),
+            },
+        });
+
+        await DevChat.EventuallyAsync(() => Task.FromResult(ilink.Sent.Count >= 3), "说明和两条新消息的回复都应该发出");
+        var texts = ilink.Sent.Select(r => r.Json.GetProperty("msg").GetProperty("item_list")[0].GetProperty("text_item").GetProperty("text").GetString() ?? "").ToList();
+        Assert.StartsWith("⏰ 有 1 条消息晚到了（最早的是 45 分钟前发的", texts[0], StringComparison.Ordinal);
+        Assert.Contains("· /pair 旧的", texts[0], StringComparison.Ordinal);
+        Assert.Contains("ChatPilot 指令", texts[1], StringComparison.Ordinal);
+        Assert.StartsWith("还没有设备", texts[2], StringComparison.Ordinal);
+        Assert.DoesNotContain(texts, t => t.Contains("🔑 配对码：", StringComparison.Ordinal));
+        Assert.Equal("c3", factory.Services.GetRequiredService<StateStore>().WeChatSnapshot()?.ContextToken);
+    }
+
+    [Fact]
     public async Task Notifications_are_pushed_to_wechat_using_latest_context_token()
     {
         SeedAccount("buf0", contextToken: "ctx-last");

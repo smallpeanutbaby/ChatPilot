@@ -169,13 +169,20 @@ public sealed class ChatDispatcher(
     /// <param name="data">图片的原始字节。</param>
     /// <param name="cancellationToken">取消排队；取消时抛出 <see cref="OperationCanceledException"/>。</param>
     /// <returns>回复主人的文字：暂存了几张、多久内有效；不是图片、太大或已满时是原因。</returns>
-    public Task<string> HandleImageAsync(byte[] data, CancellationToken cancellationToken) =>
+    public async Task<string> HandleImageAsync(byte[] data, CancellationToken cancellationToken) =>
+        (await StageImageAsync(data, cancellationToken).ConfigureAwait(false)).Reply;
+
+    /// <summary>同 <see cref="HandleImageAsync"/>，另外告诉调用方图片有没有暂存下来（带说明文字的图片没收下时，不该接着执行说明文字）。</summary>
+    /// <param name="data">图片的原始字节。</param>
+    /// <param name="cancellationToken">取消排队；取消时抛出 <see cref="OperationCanceledException"/>。</param>
+    /// <returns>是否暂存下来，以及回复主人的文字。</returns>
+    internal Task<(bool Staged, string Reply)> StageImageAsync(byte[] data, CancellationToken cancellationToken) =>
         SerialAsync(() =>
         {
             var (count, error) = media.Stage(data);
             return Task.FromResult(error is not null
-                ? "❓ " + error
-                : $"🖼 收到图片（共 {count} 张待发）。接下来用 @目标 内容 派活时会一起带上，{MediaStore.Lifetime.TotalMinutes:0} 分钟内有效；不要了发 /drop");
+                ? (false, "❓ " + error)
+                : (true, $"🖼 收到图片（共 {count} 张待发）。接下来用 @目标 内容 派活时会一起带上，{MediaStore.Lifetime.TotalMinutes:0} 分钟内有效；不要了发 /drop"));
         }, cancellationToken);
 
     /// <summary>排队执行：等前一条消息处理完再开始。</summary>

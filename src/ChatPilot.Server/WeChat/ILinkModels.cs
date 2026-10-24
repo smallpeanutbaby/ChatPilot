@@ -50,6 +50,7 @@ public sealed record GetUpdatesResponse(
 /// <param name="MessageState">消息状态，2 表示已完成。</param>
 /// <param name="ItemList">消息内容（文字、语音、图片……）。</param>
 /// <param name="ContextToken">会话上下文令牌，回复这条消息时要带上。</param>
+/// <param name="CreateTimeMs">消息的创建时间（Unix 毫秒，腾讯插件里的 <c>create_time_ms</c>）；没有时为 null。</param>
 public sealed record WeixinMessage(
     ulong? MessageId,
     string? FromUserId,
@@ -57,7 +58,8 @@ public sealed record WeixinMessage(
     int? MessageType,
     int? MessageState,
     IReadOnlyList<MessageItem>? ItemList,
-    string? ContextToken);
+    string? ContextToken,
+    long? CreateTimeMs = null);
 
 /// <summary>消息里的一项内容。</summary>
 /// <param name="Type">1 文字、2 图片、3 语音，其他类型（文件、视频）暂不处理。</param>

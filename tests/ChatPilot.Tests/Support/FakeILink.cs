@@ -29,7 +29,8 @@ internal sealed class FakeILink : HttpMessageHandler
 
     public IReadOnlyList<Request> Sent => Requests.Where(r => r.Uri.AbsolutePath == "/ilink/bot/sendmessage").ToList();
 
-    public static object Message(string from, string text, string? contextToken = null, int type = 1) => new
+    /// <param name="sentAt">消息的创建时间（create_time_ms）；为 null 时不带，和老版本的接口一样。</param>
+    public static object Message(string from, string text, string? contextToken = null, int type = 1, DateTimeOffset? sentAt = null) => new
     {
         message_id = 18446744073709551615UL,
         from_user_id = from,
@@ -37,6 +38,7 @@ internal sealed class FakeILink : HttpMessageHandler
         message_type = type,
         item_list = new[] { new { type = 1, text_item = new { text } } },
         context_token = contextToken,
+        create_time_ms = sentAt?.ToUnixTimeMilliseconds(),
     };
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)

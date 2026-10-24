@@ -15,6 +15,7 @@ namespace ChatPilot.Server.WeChat;
 /// <item>收到的消息进入有序队列，由单个后台任务按顺序处理，长轮询不会被慢指令卡住，指令也不会乱序。</item>
 /// <item>出错时重试：token 失效（-14）暂停 1 小时，连续 3 次失败退避 30 秒，其他失败 2 秒后重试。</item>
 /// <item>同步游标和 context_token 写盘失败只影响重启后的恢复，不影响这一批消息的处理。</item>
+/// <item>带创建时间、并且晚到超过 <see cref="StaleCommands.MaxDelay"/> 的消息不执行，告诉主人丢掉了哪些（和 Telegram 通道一样）。</item>
 /// </list>
 /// </remarks>
 /// <param name="client">iLink 接口客户端。</param>
@@ -48,10 +49,14 @@ public sealed class WeChatChannel(
     private readonly Channel<Inbound> _inbox = Channel.CreateBounded<Inbound>(
         new BoundedChannelOptions(InboxCapacity) { FullMode = BoundedChannelFullMode.Wait, SingleReader = true });
 
-    /// <summary>一条主人的消息：文字或图片；两个都是 null 表示收到了不支持的消息类型（文件、视频等）。</summary>
+    /// <summary>
+    /// 一条主人的消息：文字或图片；都是 null 表示收到了不支持的消息类型（文件、视频等）。
+    /// 也可以只是一条要直接发给主人的说明（<see cref="Notice"/>）。
+    /// </summary>
     /// <param name="Text">文字（语音消息是微信转写的文字）。</param>
     /// <param name="Image">要下载的图片。</param>
-    private sealed record Inbound(string? Text, ImageItem? Image);
+    /// <param name="Notice">直接发给主人的说明（例如晚到的消息被丢掉了）；有它时其他字段都不用。</param>
+    private sealed record Inbound(string? Text, ImageItem? Image, string? Notice = null);
 
     /// <inheritdoc />
     public string Name => "微信";
@@ -179,9 +184,36 @@ public sealed class WeChatChannel(
                 }
             }
 
+            var now = time.GetUtcNow();
+            var fresh = new List<Inbound>();
+            var stale = new List<(DateTimeOffset SentAt, string Summary)>();
             foreach (var message in response.Msgs ?? [])
             {
-                await AcceptAsync(account, message, stoppingToken).ConfigureAwait(false);
+                var items = Accept(account, message);
+                if (items.Count == 0)
+                {
+                    continue;
+                }
+
+                if (message.CreateTimeMs is > 0 and var ms && DateTimeOffset.FromUnixTimeMilliseconds(ms) is var sentAt && StaleCommands.IsStale(sentAt, now))
+                {
+                    stale.Add((sentAt, StaleCommands.Summarize(items.Select(i => i.Text).FirstOrDefault(t => t is not null), items.Any(i => i.Image is not null))));
+                }
+                else
+                {
+                    fresh.AddRange(items);
+                }
+            }
+
+            if (stale.Count > 0)
+            {
+                logger.LogWarning("丢掉 {Count} 条晚到超过 {Minutes} 分钟的微信消息", stale.Count, StaleCommands.MaxDelay.TotalMinutes);
+                await _inbox.Writer.WriteAsync(new Inbound(null, null, StaleCommands.Notice(stale, now)), stoppingToken).ConfigureAwait(false);
+            }
+
+            foreach (var item in fresh)
+            {
+                await _inbox.Writer.WriteAsync(item, stoppingToken).ConfigureAwait(false);
             }
         }
     }
@@ -205,22 +237,21 @@ public sealed class WeChatChannel(
         return failures;
     }
 
-    /// <summary>过滤一条消息：只认主人发的用户消息，放进有序队列等后台任务处理。</summary>
+    /// <summary>过滤一条消息：只认主人发的用户消息，整理成要放进有序队列、等后台任务处理的几条。</summary>
     /// <param name="account">当前的微信绑定信息。</param>
-    /// <param name="message">收到的消息。带 context_token 时记下来，之后回复要用；图文都有时拆成先图后文两条。</param>
-    /// <param name="stoppingToken">服务器停止时取消。</param>
-    /// <returns>消息放进队列（或被忽略）后完成的任务；队列满时会等待。</returns>
-    private async Task AcceptAsync(WeChatAccount account, WeixinMessage message, CancellationToken stoppingToken)
+    /// <param name="message">收到的消息。带 context_token 时记下来，之后回复要用（晚到的消息也记）；图文都有时拆成先图后文两条。</param>
+    /// <returns>要处理的几条；不是主人发的用户消息时为空列表。</returns>
+    private List<Inbound> Accept(WeChatAccount account, WeixinMessage message)
     {
         if (message.MessageType != ILinkConstants.MessageTypeUser)
         {
-            return;
+            return [];
         }
 
         if (!string.Equals(message.FromUserId, account.OwnerUserId, StringComparison.Ordinal))
         {
             logger.LogWarning("忽略一条不是主人发来的消息");
-            return;
+            return [];
         }
 
         if (!string.IsNullOrEmpty(message.ContextToken))
@@ -236,15 +267,18 @@ public sealed class WeChatChannel(
 
         var image = ExtractImage(message);
         var text = ExtractText(message);
+        var items = new List<Inbound>();
         if (image is not null)
         {
-            await _inbox.Writer.WriteAsync(new Inbound(null, image), stoppingToken).ConfigureAwait(false);
+            items.Add(new Inbound(null, image));
         }
 
         if (text is not null || image is null)
         {
-            await _inbox.Writer.WriteAsync(new Inbound(text, null), stoppingToken).ConfigureAwait(false);
+            items.Add(new Inbound(text, null));
         }
+
+        return items;
     }
 
     /// <summary>按收到的顺序逐条处理主人的消息并回复。图片也在这里下载，保证"先发图、再派活"的顺序。</summary>
@@ -260,6 +294,7 @@ public sealed class WeChatChannel(
                 {
                     var reply = item switch
                     {
+                        { Notice: { } notice } => notice,
                         { Image: { } image } => await AcceptImageAsync(image, stoppingToken).ConfigureAwait(false),
                         { Text: { } text } => await dispatcher.HandleAsync(text, stoppingToken).ConfigureAwait(false),
                         _ => "目前只支持文字和图片消息（语音会自动转成文字）。发 /help 查看用法",

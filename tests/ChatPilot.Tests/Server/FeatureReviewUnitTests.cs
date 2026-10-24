@@ -46,6 +46,29 @@ public class FeatureReviewUnitTests
     }
 
     [Fact]
+    public void Late_messages_use_the_same_ten_minutes_as_missed_jobs_and_the_notice_lists_them()
+    {
+        // 审查 #3。
+        var now = new DateTimeOffset(2026, 10, 24, 12, 0, 0, TimeSpan.Zero);
+        Assert.Equal(Scheduler.MissedGrace, StaleCommands.MaxDelay);
+        Assert.False(StaleCommands.IsStale(now.AddMinutes(-10), now));
+        Assert.True(StaleCommands.IsStale(now.AddMinutes(-11), now));
+        Assert.False(StaleCommands.IsStale(now.AddMinutes(5), now));
+
+        Assert.Equal("[图片]", StaleCommands.Summarize(null, attachment: true));
+        Assert.Equal("[图片] @a 看看", StaleCommands.Summarize("@a\n看看", attachment: true));
+        Assert.Equal("[消息]", StaleCommands.Summarize(" ", attachment: false));
+
+        var dropped = Enumerable.Range(1, 7).Select(i => (now.AddHours(-i), $"/m{i}")).ToList();
+        var notice = StaleCommands.Notice(dropped, now);
+        Assert.StartsWith("⏰ 有 7 条消息晚到了（最早的是 7 小时前发的", notice, StringComparison.Ordinal);
+        Assert.Contains("· /m5", notice, StringComparison.Ordinal);
+        Assert.DoesNotContain("· /m6", notice, StringComparison.Ordinal);
+        Assert.Contains("· ……还有 2 条", notice, StringComparison.Ordinal);
+        Assert.Throws<ArgumentException>(() => StaleCommands.Notice([], now));
+    }
+
+    [Fact]
     public void Blocked_agents_learned_from_command_results_are_candidates()
     {
         var time = new FakeTimeProvider();

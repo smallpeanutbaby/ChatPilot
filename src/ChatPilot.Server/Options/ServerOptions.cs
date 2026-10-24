@@ -179,7 +179,30 @@ public sealed class TelegramOptions
     /// <summary>一次回复最多拆成几条消息。</summary>
     public int MaxChunks { get; set; } = 4;
 
-    /// <summary>检查配置；没启用时不检查。</summary>
+    /// <summary><see cref="Proxy"/> 格式不对时给管理员看的说明。</summary>
+    internal const string ProxyError = "Telegram:Proxy 必须是 http://、https:// 或 socks5:// 开头的代理地址，例如 http://127.0.0.1:7890";
+
+    /// <summary>解析 <see cref="Proxy"/>：去掉首尾空白，空的当作没配置。</summary>
+    /// <param name="proxy">解析出的代理地址；没配置代理或格式不对时为 null。</param>
+    /// <returns>没配置代理、或者配置的是 http / https / socks5 的绝对地址时为 <c>true</c>；格式不对时为 <c>false</c>。</returns>
+    internal bool TryGetProxy(out Uri? proxy)
+    {
+        proxy = null;
+        if (string.IsNullOrWhiteSpace(Proxy))
+        {
+            return true;
+        }
+
+        if (!Uri.TryCreate(Proxy.Trim(), UriKind.Absolute, out var parsed) || parsed.Scheme is not ("http" or "https" or "socks5"))
+        {
+            return false;
+        }
+
+        proxy = parsed;
+        return true;
+    }
+
+    /// <summary>检查配置；没启用时不检查（写错的设置也不影响服务器启动）。</summary>
     /// <returns>每个问题一条给管理员看的说明；没启用或配置没问题时为空列表。</returns>
     public IReadOnlyList<string> Validate()
     {
@@ -205,9 +228,9 @@ public sealed class TelegramOptions
             errors.Add("Telegram:ApiBaseUrl 不是合法的地址");
         }
 
-        if (Proxy is not null && (!Uri.TryCreate(Proxy, UriKind.Absolute, out var proxy) || proxy.Scheme is not ("http" or "https" or "socks5")))
+        if (!TryGetProxy(out _))
         {
-            errors.Add("Telegram:Proxy 必须是 http://、https:// 或 socks5:// 开头的代理地址");
+            errors.Add(ProxyError);
         }
 
         if (MaxChunkChars is < 200 or > 4096)

@@ -27,8 +27,8 @@ public sealed class Scheduler(
     TimeProvider time,
     ILogger<Scheduler> logger) : BackgroundService
 {
-    /// <summary>错过执行时间多久以内还照常执行。</summary>
-    internal static readonly TimeSpan MissedGrace = TimeSpan.FromMinutes(10);
+    /// <summary>错过执行时间多久以内还照常执行；和晚到的聊天消息用同一个标准（<see cref="StaleCommands.MaxDelay"/>）。</summary>
+    internal static readonly TimeSpan MissedGrace = StaleCommands.MaxDelay;
 
     /// <summary>多久检查一次有没有到点的任务，也就是任务到点后最多晚这么久执行。</summary>
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(5);

@@ -29,15 +29,21 @@ public sealed record TelegramUpdate(long UpdateId, TelegramMessage? Message);
 /// <param name="From">发送人。</param>
 /// <param name="Chat">所在的对话。</param>
 /// <param name="Text">文字。</param>
-/// <param name="Caption">图片的说明文字。</param>
+/// <param name="Caption">图片、文件、视频等的说明文字。</param>
 /// <param name="Photo">图片的各个尺寸（从小到大）。</param>
+/// <param name="Date">发送时间（Unix 秒）；没有时为 0。</param>
+/// <param name="MediaGroupId">相册编号：一次发的几张图片各是一条消息，编号相同；不是相册时为 null。</param>
+/// <param name="Document">按文件发送的内容（包括"按文件发送"的图片）；不是文件时为 null。</param>
 public sealed record TelegramMessage(
     long MessageId,
     TelegramUser? From,
     TelegramChat Chat,
     string? Text,
     string? Caption,
-    IReadOnlyList<TelegramPhotoSize>? Photo);
+    IReadOnlyList<TelegramPhotoSize>? Photo,
+    long Date = 0,
+    string? MediaGroupId = null,
+    TelegramDocument? Document = null);
 
 /// <summary>Telegram 用户。</summary>
 /// <param name="Id">用户 ID。</param>
@@ -52,6 +58,13 @@ public sealed record TelegramChat(long Id, string? Type);
 /// <param name="FileId">文件 ID，用 getFile 换下载路径。</param>
 /// <param name="FileSize">字节数（可能没有）。</param>
 public sealed record TelegramPhotoSize(string FileId, long? FileSize);
+
+/// <summary>按文件发送的内容。</summary>
+/// <param name="FileId">文件 ID，用 getFile 换下载路径。</param>
+/// <param name="FileName">发送方给的文件名（可能没有）。</param>
+/// <param name="MimeType">发送方给的 MIME 类型（可能没有），例如 <c>image/png</c>。</param>
+/// <param name="FileSize">字节数（可能没有）。</param>
+public sealed record TelegramDocument(string FileId, string? FileName, string? MimeType, long? FileSize);
 
 /// <summary>
 /// Telegram Bot API：长轮询收消息、发文字、下载图片。bot token 是地址的一部分，所以这里出的错误信息里一律不带地址。
@@ -164,18 +177,30 @@ public sealed class TelegramClient(HttpClient http, IOptions<ServerOptions> opti
         }
     }
 
-    /// <summary>创建访问 Telegram 用的 HTTP 客户端（配置了代理时走代理）。</summary>
+    /// <summary>
+    /// 创建访问 Telegram 用的 HTTP 客户端（启用并配置了代理时走代理）。没启用 Telegram 时不看代理设置：
+    /// 这个客户端不会被用到，写错的代理地址不能让服务器起不来。
+    /// </summary>
     /// <param name="settings">Telegram 配置。</param>
     /// <returns>不设整体超时的客户端：长轮询要等很久，超时由 <see cref="TelegramClient"/> 按请求控制。</returns>
     /// <exception cref="ArgumentNullException"><paramref name="settings"/> 为 null。</exception>
+    /// <exception cref="InvalidOperationException">启用了 Telegram，但代理地址格式不对（正常情况下启动前的配置检查已经拦下了）。</exception>
     public static HttpClient CreateHttpClient(TelegramOptions settings)
     {
         ArgumentNullException.ThrowIfNull(settings);
         var handler = new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5), ConnectTimeout = TimeSpan.FromSeconds(15) };
-        if (settings.Proxy is { Length: > 0 } proxy)
+        if (settings.Enabled)
         {
-            handler.Proxy = new WebProxy(new Uri(proxy));
-            handler.UseProxy = true;
+            if (!settings.TryGetProxy(out var proxy))
+            {
+                throw new InvalidOperationException(TelegramOptions.ProxyError);
+            }
+
+            if (proxy is not null)
+            {
+                handler.Proxy = new WebProxy(proxy);
+                handler.UseProxy = true;
+            }
         }
 
         return new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
