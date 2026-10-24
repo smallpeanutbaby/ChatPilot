@@ -426,7 +426,7 @@ public sealed class PromptTracker : IAsyncDisposable
         try
         {
             text = blocked
-                ? await _replies.GetScreenExcerptAsync(agent.PaneId, cancellationToken).ConfigureAwait(false)
+                ? await _replies.ShowDialogAsync(agent, cancellationToken).ConfigureAwait(false)
                 : await _replies.GetLastReplyAsync(agent, prompt, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is HerdrException or IOException or UnauthorizedAccessException or InvalidOperationException)

@@ -51,6 +51,7 @@ ChatPilot 能让手机远程指挥电脑上的 AI agent 写代码、运行命令
 | S-10 | agent 类型只能是 herdr 内置类型或本机配置的启动器；启动器命令来自本机配置文件，不接受远程输入，不能换行 | `NodeConfig`、`CommandExecutor` | `Start_agent_refuses_paths_outside_whitelist_and_unknown_kinds` |
 | — | 按键白名单：只有方向键、回车、Esc、Tab、退格、Ctrl+C、y/n、1–9，不能拼出任意文字 | `Validation.AllowedKeys` | `Only_whitelisted_keys_are_allowed` |
 | — | `/yes` 先读屏幕找选项再导航，不会盲按回车；只选"这一次同意"，带"不再询问 / 全部允许 / 自动接受"等会扩大权限的选项一律不自动选 | `ApprovalNavigator` | `Never_picks_an_option_that_escalates_permissions`、`Plain_yes_is_preferred` |
+| — | `/yes` 只同意给用户看过的确认框（状态序号和确认框内容都要对上），每个只同意一次：迟到或重复的 `/yes` 不会同意用户没看过的新确认框 | `ShownDialogs`、`ApprovalNavigator.Fingerprint` | `Late_yes_does_not_approve_a_dialog_that_replaced_the_one_shown`、`A_shown_dialog_is_approved_at_most_once` |
 | — | 校验正则用 `\z` 结尾（.NET 的 `$` 会放过结尾换行） | `Validation` | `Trailing_newline_does_not_bypass_validation` |
 
 ### 3.4 资源和健壮性

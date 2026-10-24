@@ -118,7 +118,7 @@ public sealed class CommandExecutor(
 
         if (agent.Status == AgentStatus.Blocked)
         {
-            var screen = await ScreenExcerptOrNoteAsync(agent.PaneId, cancellationToken).ConfigureAwait(false);
+            var screen = await ShowDialogOrNoteAsync(agent, cancellationToken).ConfigureAwait(false);
             return CommandOutcome.Failure(ErrorCodes.AgentBlocked, "它正在等你确认，先回复 /yes 或 /no：\n\n" + screen);
         }
 
@@ -212,7 +212,7 @@ public sealed class CommandExecutor(
         string? screen = null;
         if (agent.Status == AgentStatus.Blocked)
         {
-            screen = await ScreenExcerptOrNoteAsync(agent.PaneId, cancellationToken).ConfigureAwait(false);
+            screen = await ShowDialogOrNoteAsync(agent, cancellationToken).ConfigureAwait(false);
         }
 
         if (!string.IsNullOrWhiteSpace(command.InitialPrompt))
@@ -336,6 +336,18 @@ public sealed class CommandExecutor(
             return CommandOutcome.Failure(ErrorCodes.NotFound, error + "\n\n" + ReplyExtractor.ScreenExcerpt(screen, 15));
         }
 
+        // 只同意给用户看过的那个确认框：通知发出后，原来的确认框可能已经在电脑上处理掉、又弹出了新的。
+        var check = replies.Dialogs.Consume(agent, screen);
+        if (check != DialogCheck.Shown)
+        {
+            var reason = check == DialogCheck.Changed
+                ? "确认框和发给你的不是同一个了（可能已经在电脑上处理过，又弹出了新的）"
+                : "这个确认框还没发给你看过";
+            return CommandOutcome.Failure(
+                ErrorCodes.AgentBlocked,
+                $"{reason}，没有按任何键。现在的确认框：\n\n{replies.ShowDialog(agent, screen)}\n\n看过没问题再回复一次 /yes");
+        }
+
         await herdr.SendKeysAsync(agent.PaneId, plan.Keys, cancellationToken).ConfigureAwait(false);
         tracker.WatchAfterResponse(agent);
         return CommandOutcome.Success(new AckData($"已选择：{plan.OptionText}"));
@@ -361,15 +373,15 @@ public sealed class CommandExecutor(
     private static bool IsConfirmKey(string key) => key is "enter" or "y" || (key.Length == 1 && char.IsAsciiDigit(key[0]));
 
     /// <summary>屏幕摘要；读取失败时返回提示文字，不影响主流程。</summary>
-    private async Task<string> ScreenExcerptOrNoteAsync(string target, CancellationToken cancellationToken)
+    private async Task<string> ShowDialogOrNoteAsync(HerdrAgent agent, CancellationToken cancellationToken)
     {
         try
         {
-            return await replies.GetScreenExcerptAsync(target, cancellationToken).ConfigureAwait(false);
+            return await replies.ShowDialogAsync(agent, cancellationToken).ConfigureAwait(false);
         }
         catch (HerdrException ex)
         {
-            logger.LogWarning("读取 {Target} 的屏幕失败：{Message}", target, ex.Message);
+            logger.LogWarning("读取 {Target} 的屏幕失败：{Message}", agent.Name ?? agent.PaneId, ex.Message);
             return "（读取屏幕失败，请用 /read 查看）";
         }
     }

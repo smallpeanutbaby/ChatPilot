@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace ChatPilot.Node.Execution;
@@ -21,6 +22,9 @@ public static partial class ApprovalNavigator
     /// <summary>选中标记只在屏幕底部这么多个非空行里找（确认框总在底部，避免把历史里的用户输入当成选项）。</summary>
     private const int SearchLines = 30;
 
+    /// <summary>确认框指纹最多算上选项上方这么多个非空行。</summary>
+    private const int FingerprintContextLines = 20;
+
     /// <summary>选中某个选项的操作计划。</summary>
     /// <param name="Keys">要依次按的键，例如 <c>down</c>、<c>enter</c>。</param>
     /// <param name="OptionText">会被选中的选项文字，回复给用户确认。</param>
@@ -38,35 +42,7 @@ public static partial class ApprovalNavigator
     {
         ArgumentNullException.ThrowIfNull(screen);
         plan = null;
-        var lines = ReplyExtractor.SplitLines(screen).Select(StripBox).ToList();
-
-        List<(int Line, string Text)>? options = null;
-        var cursor = -1;
-        var sawCursor = false;
-        var nonEmpty = 0;
-        for (var i = lines.Count - 1; i >= 0 && options is null && nonEmpty < SearchLines; i--)
-        {
-            if (lines[i].Trim().Length == 0)
-            {
-                continue;
-            }
-
-            nonEmpty++;
-            if (CursorColumn(lines, i) is not { } column)
-            {
-                continue;
-            }
-
-            sawCursor = true;
-            var found = ReadOptions(lines, i, column);
-            if (found.Count >= 2 && found.Any(o => DeclineRegex().IsMatch(StripNumber(o.Text))))
-            {
-                options = found;
-                cursor = i;
-            }
-        }
-
-        if (options is null)
+        if (FindDialog(SplitScreen(screen), out var sawCursor) is not { } dialog)
         {
             error = sawCursor
                 ? "屏幕上没有找到确认框（要同时有\"同意\"和\"拒绝 / 取消\"两类选项才算）。确实有确认框的话，请用 /keys 手动操作"
@@ -74,6 +50,7 @@ public static partial class ApprovalNavigator
             return false;
         }
 
+        var (options, cursor) = dialog;
         var current = options.FindIndex(o => o.Line == cursor);
         var target = PickApproveOption(options.Select(o => o.Text).ToList());
         if (target < 0)
@@ -97,6 +74,96 @@ public static partial class ApprovalNavigator
         error = "";
         return true;
     }
+
+    /// <summary>
+    /// 确认框的指纹，用来认出屏幕上的确认框是不是给用户看过的那一个：选项文字，加上选项上方到横线或边框为止
+    /// （最多 <see cref="FingerprintContextLines"/> 个非空行）的内容，也就是命令、文件名和问题。
+    /// 选中标记移到哪个选项不影响指纹；空白、装饰字符和数字的具体值也不算，免得计时器、转圈动画一刷新就对不上。
+    /// </summary>
+    /// <returns>屏幕上没有确认框时返回 null。</returns>
+    public static string? Fingerprint(string screen)
+    {
+        ArgumentNullException.ThrowIfNull(screen);
+        var lines = SplitScreen(screen);
+        if (FindDialog(lines, out _) is not { } dialog)
+        {
+            return null;
+        }
+
+        var context = new List<string>();
+        for (var i = dialog.Options[0].Line - 1; i >= 0 && context.Count < FingerprintContextLines; i--)
+        {
+            if (ReplyExtractor.IsSeparator(lines[i]) || ReplyExtractor.IsBoxBorder(lines[i]))
+            {
+                break;
+            }
+
+            if (FingerprintText(lines[i]) is { Length: > 0 } text)
+            {
+                context.Insert(0, text);
+            }
+        }
+
+        return string.Join("\n", context.Concat(dialog.Options.Select(o => FingerprintText(o.Text))));
+    }
+
+    private static List<string> SplitScreen(string screen) => ReplyExtractor.SplitLines(screen).Select(StripBox).ToList();
+
+    /// <summary>从底部往上找确认框：选中行和同一列的其他选项，其中要有拒绝 / 取消类。找不到返回 null。</summary>
+    private static (List<(int Line, string Text)> Options, int Cursor)? FindDialog(List<string> lines, out bool sawCursor)
+    {
+        sawCursor = false;
+        var nonEmpty = 0;
+        for (var i = lines.Count - 1; i >= 0 && nonEmpty < SearchLines; i--)
+        {
+            if (lines[i].Trim().Length == 0)
+            {
+                continue;
+            }
+
+            nonEmpty++;
+            if (CursorColumn(lines, i) is not { } column)
+            {
+                continue;
+            }
+
+            sawCursor = true;
+            var found = ReadOptions(lines, i, column);
+            if (found.Count >= 2 && found.Any(o => DeclineRegex().IsMatch(StripNumber(o.Text))))
+            {
+                return (found, i);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>指纹里的一行：去掉空白和装饰字符，连续的数字记成一个 <c>#</c>。</summary>
+    private static string FingerprintText(string line)
+    {
+        var text = new StringBuilder(line.Length);
+        foreach (var c in line)
+        {
+            if (char.IsDigit(c))
+            {
+                if (text.Length == 0 || text[^1] != '#')
+                {
+                    text.Append('#');
+                }
+            }
+            else if (!char.IsWhiteSpace(c) && !IsDecoration(c))
+            {
+                text.Append(c);
+            }
+        }
+
+        return text.ToString();
+    }
+
+    /// <summary>界面装饰：中点、箭头、技术符号（⏺ ⎿ ⏵）、制表符和几何图形（边框、● ▶）、装饰符号（✻ ✶）、盲文点（转圈动画）。</summary>
+    private static bool IsDecoration(char c) =>
+        c is '·' or (>= '←' and <= '⇿') or (>= '⌀' and <= '⏿') or (>= '─' and <= '◿')
+            or (>= '✀' and <= '➿') or (>= '⠀' and <= '⣿');
 
     /// <summary>
     /// 选出要选中的同意类选项，都不扩大权限：纯粹的 Yes / Allow 优先，其次是"仅这一次"，再其次是第一个同意类选项；都没有返回 -1。

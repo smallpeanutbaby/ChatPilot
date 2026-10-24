@@ -396,6 +396,46 @@ public class ApprovalNavigatorTests
         Assert.False(ApprovalNavigator.TryPlanApprove(screen, out _, out var error));
         Assert.Contains("/keys", error, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void Fingerprint_tells_dialogs_apart_by_command_and_options()
+    {
+        var shown = ApprovalNavigator.Fingerprint(SampleScreens.PermissionDialog);
+        Assert.NotNull(shown);
+        Assert.NotEqual(shown, ApprovalNavigator.Fingerprint(SampleScreens.PermissionDialog.Replace("rm -rf build", "rm -rf /", StringComparison.Ordinal)));
+        Assert.NotEqual(shown, ApprovalNavigator.Fingerprint(SampleScreens.PermissionDialog.Replace("for rm commands", "for git commands", StringComparison.Ordinal)));
+        Assert.NotEqual(shown, ApprovalNavigator.Fingerprint(SampleScreens.TrustDialog));
+    }
+
+    [Fact]
+    public void Fingerprint_ignores_cursor_position_timers_spinners_and_content_above_the_dialog()
+    {
+        const string screen = """
+          ⏺ Earlier reply
+          ──────────────────────────────────────
+          ⠋ Waiting for approval (3s)
+          Run this command?
+          $ rm -rf build
+          ▶ 1. Approve once
+            2. Approve for this session
+            3. Reject
+          ↵ confirm  1/2/3 choose
+        """;
+        var later = screen
+            .Replace("⏺ Earlier reply", "⏺ Something else", StringComparison.Ordinal)
+            .Replace("⠋ Waiting for approval (3s)", "⠹ Waiting for approval (12s)", StringComparison.Ordinal)
+            .Replace("▶ 1. Approve once", "  1. Approve once", StringComparison.Ordinal)
+            .Replace("  2. Approve for this session", "▶ 2. Approve for this session", StringComparison.Ordinal);
+        Assert.NotNull(ApprovalNavigator.Fingerprint(screen));
+        Assert.Equal(ApprovalNavigator.Fingerprint(screen), ApprovalNavigator.Fingerprint(later));
+    }
+
+    [Fact]
+    public void Fingerprint_is_null_without_a_dialog()
+    {
+        Assert.Null(ApprovalNavigator.Fingerprint(SampleScreens.IdleScreen));
+        Assert.Null(ApprovalNavigator.Fingerprint(SampleScreens.ClaudeReply));
+    }
 }
 
 /// <summary>由目录名生成 agent 名字和工作区标签。</summary>

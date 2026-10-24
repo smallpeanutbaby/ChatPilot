@@ -192,7 +192,7 @@ public static partial class ReplyExtractor
     }
 
     /// <summary>圆角框的上下边：<c>╭────╮</c>、<c>╰────╯</c>。</summary>
-    private static bool IsBoxBorder(string line)
+    internal static bool IsBoxBorder(string line)
     {
         var trimmed = line.Trim();
         return trimmed.Length >= 3 && trimmed[0] is '╭' or '╰' && trimmed[^1] is '╮' or '╯' && trimmed[1..^1].All(c => c == '─');
