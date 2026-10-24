@@ -4,6 +4,8 @@ using ChatPilot.Shared.Protocol;
 namespace ChatPilot.Node.Herdr;
 
 /// <summary>herdr 返回的错误。<see cref="Code"/> 是 herdr 的错误码，例如 <c>agent_not_found</c>、<c>timeout</c>。</summary>
+/// <param name="code">herdr 的错误码；节点自己判断出的错误用 <c>herdr_unavailable</c>、<c>timeout</c>、<c>herdr_error</c>、<c>bad_response</c>。</param>
+/// <param name="message">错误说明。</param>
 public sealed class HerdrException(string code, string message) : Exception(message)
 {
     /// <summary>herdr 的错误码。</summary>
@@ -42,10 +44,14 @@ public sealed record HerdrAgent(
     public bool IsReady => Status is AgentStatus.Idle or AgentStatus.Done;
 
     /// <summary>转成协议里的概要信息。</summary>
+    /// <param name="workspaceLabel">所在工作区的名字；不知道时为 null。</param>
+    /// <returns>概要信息；盯着、排队数和任务开始时间这些节点状态不在这里填，保持默认值。</returns>
     public AgentSummary ToSummary(string? workspaceLabel) =>
         new(PaneId, Name, Kind, Status, workspaceLabel, Cwd, Title);
 
     /// <summary>解析 herdr 的 agent 对象；不是对象或缺少 pane_id 时返回 null，其他字段缺失时尽量容错。</summary>
+    /// <param name="element">herdr 返回的 agent 对象。</param>
+    /// <returns>解析出的 agent（工作目录优先取前台进程的）；没有 <c>pane_id</c> 时为 null。</returns>
     public static HerdrAgent? TryParse(JsonElement element)
     {
         if (GetString(element, "pane_id") is not { } paneId)
@@ -75,6 +81,9 @@ public sealed record HerdrAgent(
     }
 
     /// <summary>安全地取字符串字段：不是对象、没有这个字段或字段不是字符串时返回 null。</summary>
+    /// <param name="element">父元素。</param>
+    /// <param name="property">字段名。</param>
+    /// <returns>字段的字符串值；取不到时为 null。</returns>
     internal static string? GetString(JsonElement element, string property) =>
         element.ValueKind == JsonValueKind.Object
         && element.TryGetProperty(property, out var value)

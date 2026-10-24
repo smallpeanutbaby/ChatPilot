@@ -33,6 +33,7 @@ public sealed class ShownDialogs
     /// <summary>最多记这么多个 agent，超出时全部清空（只会让 /yes 多确认一次）。</summary>
     private const int MaxEntries = 256;
 
+    /// <summary>按 pane ID 记的、给用户看过的确认框：当时的状态序号和确认框指纹。</summary>
     private readonly ConcurrentDictionary<string, (long Seq, string Fingerprint)> _shown = new(StringComparer.Ordinal);
 
     /// <summary>记下要给用户看的确认框。屏幕上没有认得出的确认框时，清掉这个 agent 之前的记录。</summary>
@@ -58,6 +59,7 @@ public sealed class ShownDialogs
     /// <summary>屏幕上的确认框是不是给用户看过的那一个；是的话把记录作废，同一个确认框只能同意一次。</summary>
     /// <param name="agent">读屏幕之前取到的 agent 状态。</param>
     /// <param name="screen">当前屏幕。</param>
+    /// <returns>比对结果；只有返回 <see cref="DialogCheck.Shown"/> 时才可以同意。</returns>
     public DialogCheck Consume(HerdrAgent agent, string screen)
     {
         ArgumentNullException.ThrowIfNull(agent);

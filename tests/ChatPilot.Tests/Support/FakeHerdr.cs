@@ -56,6 +56,9 @@ internal sealed class FakeHerdr : IProcessRunner
         public string Cwd { get; set; } = "/tmp";
 
         public string? Title { get; set; }
+
+        /// <summary>为 true 时 herdr 查不到它（get、wait、list 都当它不存在），模拟 agent 重启时 herdr 一时没识别出来。</summary>
+        public bool Hidden { get; set; }
     }
 
     public ConcurrentQueue<string[]> Calls { get; } = new();
@@ -71,6 +74,9 @@ internal sealed class FakeHerdr : IProcessRunner
 
     /// <summary>让 agent prompt 返回这个错误码。</summary>
     public string? PromptError { get; set; }
+
+    /// <summary>不为 null 时，agent prompt 先等它完成再提交（模拟提交卡在半路，用来制造并发）。</summary>
+    public TaskCompletionSource? PromptGate { get; set; }
 
     /// <summary>agent start 时卡在确认框（返回 agent_not_ready）。</summary>
     public bool StartBlocked { get; set; }
@@ -106,7 +112,7 @@ internal sealed class FakeHerdr : IProcessRunner
     {
         lock (_lock)
         {
-            return _agents.FirstOrDefault(a => a.Name == target || a.PaneId == target);
+            return _agents.FirstOrDefault(a => !a.Hidden && (a.Name == target || a.PaneId == target));
         }
     }
 
@@ -128,7 +134,7 @@ internal sealed class FakeHerdr : IProcessRunner
             case "agent list":
                 lock (_lock)
                 {
-                    return Ok(new { type = "agent_list", agents = _agents.Select(ToJson).ToArray() });
+                    return Ok(new { type = "agent_list", agents = _agents.Where(x => !x.Hidden).Select(ToJson).ToArray() });
                 }
 
             case "workspace list":
@@ -156,6 +162,11 @@ internal sealed class FakeHerdr : IProcessRunner
 
             case "agent prompt":
             {
+                if (PromptGate is { } gate)
+                {
+                    await gate.Task.WaitAsync(cancellationToken);
+                }
+
                 if (PromptError is { } error)
                 {
                     return Error(error, "simulated " + error);
@@ -247,6 +258,12 @@ internal sealed class FakeHerdr : IProcessRunner
                     root_pane = new { pane_id = workspace + ":p1", cwd },
                 });
             }
+
+            case "pane close":
+                lock (_lock)
+                {
+                    return _agents.RemoveAll(x => x.PaneId == a[2]) > 0 ? Ok(new { type = "ok" }) : Error("pane_not_found", $"pane {a[2]} not found");
+                }
 
             case "workspace close":
                 lock (_lock)

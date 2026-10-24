@@ -137,6 +137,33 @@ public class HerdrClientTests
         await Assert.ThrowsAsync<ProcessStartException>(() => runner.RunAsync("/nonexistent/herdr", [], TimeSpan.FromSeconds(1), CancellationToken.None));
     }
 
+    [Fact]
+    public async Task Real_process_runner_stops_reading_and_kills_a_process_with_endless_output()
+    {
+        // 审查：输出先整个读进内存再截短，一个几百 MB 的 diff 就能把节点的内存吃光。
+        var runner = new ProcessRunner(maxOutputChars: 10_000);
+        var (file, args) = OperatingSystem.IsWindows()
+            ? ("cmd.exe", new[] { "/c", "for /l %i in (0,0,1) do @echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" })
+            : ("yes", Array.Empty<string>());
+        var result = await runner.RunAsync(file, args, TimeSpan.FromSeconds(10), CancellationToken.None);
+        Assert.True(result.Truncated);
+        Assert.Equal(10_000, result.StandardOutput.Length);
+
+        var (echo, echoArgs) = OperatingSystem.IsWindows() ? ("cmd.exe", new[] { "/c", "echo hi" }) : ("/bin/echo", new[] { "hi" });
+        var small = await runner.RunAsync(echo, echoArgs, TimeSpan.FromSeconds(10), CancellationToken.None);
+        Assert.Equal(("hi", false), (small.StandardOutput.Trim(), small.Truncated));
+    }
+
+    [Fact]
+    public async Task Truncated_herdr_output_is_an_error_not_a_result()
+    {
+        var truncated = new ProcessResult(0, """{"id":"x","result":{"type":"agent_list","agents":[""", "") { Truncated = true };
+        var client = new HerdrClient(new RecordingRunner(truncated), "herdr", null, TimeSpan.FromSeconds(5));
+        var ex = await Assert.ThrowsAsync<HerdrException>(() => client.ListAgentsAsync(CancellationToken.None));
+        Assert.Equal("output_too_large", ex.Code);
+        await Assert.ThrowsAsync<HerdrException>(() => client.ReadAsync("w1:p1", "visible", 10, CancellationToken.None));
+    }
+
     private sealed class ThrowingRunner(Exception exception) : IProcessRunner
     {
         public Task<ProcessResult> RunAsync(string fileName, IReadOnlyList<string> arguments, TimeSpan timeout, CancellationToken cancellationToken) =>

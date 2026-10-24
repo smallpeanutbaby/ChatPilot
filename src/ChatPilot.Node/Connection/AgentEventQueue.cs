@@ -11,10 +11,13 @@ namespace ChatPilot.Node.Connection;
 public sealed record QueuedEvent(AgentEvent Event, Action? Delivered);
 
 /// <summary>待上报的 agent 事件。断线期间先存着，重连后补发；最多存 200 条。</summary>
+/// <param name="logger">日志（队列满、丢弃事件时记一条）。</param>
 public sealed class AgentEventQueue(ILogger<AgentEventQueue> logger) : IAgentEventSink
 {
+    /// <summary>最多存多少条待上报事件；满了之后新事件被丢弃。</summary>
     private const int Capacity = 200;
 
+    /// <summary>有界队列：写入方用 <c>TryWrite</c>，满了立即失败而不是等；只有 <see cref="ServerConnection"/> 一个读取方。</summary>
     private readonly Channel<QueuedEvent> _channel = Channel.CreateBounded<QueuedEvent>(
         new BoundedChannelOptions(Capacity) { FullMode = BoundedChannelFullMode.Wait, SingleReader = true });
 

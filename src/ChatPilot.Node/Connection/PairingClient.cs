@@ -5,6 +5,8 @@ using ChatPilot.Shared.Protocol;
 namespace ChatPilot.Node.Connection;
 
 /// <summary>配对失败，异常消息可以直接给用户看。</summary>
+/// <param name="message">给用户看的原因。</param>
+/// <param name="inner">底层的网络异常；没有时为 null。</param>
 public sealed class PairingException(string message, Exception? inner = null) : Exception(message, inner);
 
 /// <summary>用配对码向服务器换设备令牌。</summary>
@@ -15,6 +17,7 @@ public static class PairingClient
     /// <param name="handler">HTTP 处理器（带证书指纹校验，见 <see cref="PinnedTransport.CreateHttpHandler"/>）。</param>
     /// <param name="request">配对请求。</param>
     /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>服务器分配的设备 ID、最终设备名和设备令牌。</returns>
     /// <exception cref="PairingException">配对码无效、请求太频繁或连不上服务器。</exception>
     public static async Task<PairResponse> PairAsync(Uri server, HttpMessageHandler handler, PairRequest request, CancellationToken cancellationToken)
     {

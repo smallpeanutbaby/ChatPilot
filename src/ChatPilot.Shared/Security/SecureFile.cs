@@ -7,6 +7,7 @@ public static class SecureFile
     /// 确保目录存在。只有目录是这次新建的才把权限设成 700：
     /// 已有的目录（比如 <c>--config ~/node.json</c> 时的用户主目录）不去改它的权限。
     /// </summary>
+    /// <param name="directory">目录路径。</param>
     public static void EnsurePrivateDirectory(string directory)
     {
         if (Directory.Exists(directory))
@@ -25,6 +26,9 @@ public static class SecureFile
     }
 
     /// <summary>写入文本文件（UTF-8）：先写权限 600 的临时文件并落盘，再原子替换目标文件。</summary>
+    /// <param name="path">目标文件路径；所在目录不存在时按 <see cref="EnsurePrivateDirectory"/> 新建。</param>
+    /// <param name="contents">文件内容。</param>
+    /// <exception cref="ArgumentException"><paramref name="path"/> 没有所在目录（例如是根目录）。</exception>
     public static void WriteAllText(string path, string contents)
     {
         var directory = Path.GetDirectoryName(Path.GetFullPath(path))
@@ -56,6 +60,9 @@ public static class SecureFile
     }
 
     /// <summary>写入二进制文件，规则同 <see cref="WriteAllText"/>。</summary>
+    /// <param name="path">目标文件路径；所在目录不存在时按 <see cref="EnsurePrivateDirectory"/> 新建。</param>
+    /// <param name="contents">文件内容。</param>
+    /// <exception cref="ArgumentException"><paramref name="path"/> 没有所在目录（例如是根目录）。</exception>
     public static void WriteAllBytes(string path, byte[] contents)
     {
         var directory = Path.GetDirectoryName(Path.GetFullPath(path))
@@ -82,6 +89,9 @@ public static class SecureFile
         }
     }
 
+    /// <summary>新建一个只有当前用户能读写的空文件（Unix 下创建时就是 600），文件已存在时失败，不会写到别人放好的文件里。</summary>
+    /// <param name="path">文件路径。</param>
+    /// <returns>以独占方式打开、只写的文件流。</returns>
     private static FileStream CreatePrivateFile(string path)
     {
         var options = new FileStreamOptions

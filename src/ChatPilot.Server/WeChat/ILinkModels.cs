@@ -50,6 +50,7 @@ public sealed record GetUpdatesResponse(
 /// <param name="MessageState">消息状态，2 表示已完成。</param>
 /// <param name="ItemList">消息内容（文字、语音、图片……）。</param>
 /// <param name="ContextToken">会话上下文令牌，回复这条消息时要带上。</param>
+/// <param name="CreateTimeMs">消息的创建时间（Unix 毫秒，腾讯插件里的 <c>create_time_ms</c>）；没有时为 null。</param>
 public sealed record WeixinMessage(
     ulong? MessageId,
     string? FromUserId,
@@ -57,13 +58,26 @@ public sealed record WeixinMessage(
     int? MessageType,
     int? MessageState,
     IReadOnlyList<MessageItem>? ItemList,
-    string? ContextToken);
+    string? ContextToken,
+    long? CreateTimeMs = null);
 
 /// <summary>消息里的一项内容。</summary>
-/// <param name="Type">1 文字、3 语音，其他类型（图片、文件、视频）暂不处理。</param>
+/// <param name="Type">1 文字、2 图片、3 语音，其他类型（文件、视频）暂不处理。</param>
 /// <param name="TextItem">文字内容。</param>
 /// <param name="VoiceItem">语音内容（带微信自动转写的文字）。</param>
-public sealed record MessageItem(int? Type, TextItem? TextItem, VoiceItem? VoiceItem);
+/// <param name="ImageItem">图片内容。</param>
+public sealed record MessageItem(int? Type, TextItem? TextItem, VoiceItem? VoiceItem, ImageItem? ImageItem = null);
+
+/// <summary>图片内容：原图存在微信 CDN 上，用 AES-128-ECB 加密。</summary>
+/// <param name="Media">原图的 CDN 引用。</param>
+/// <param name="Aeskey">解密密钥（32 位十六进制，16 字节）；有它时优先用它，而不是 <see cref="CdnMedia.AesKey"/>。</param>
+public sealed record ImageItem(CdnMedia? Media, string? Aeskey);
+
+/// <summary>微信 CDN 上的一个文件。</summary>
+/// <param name="EncryptQueryParam">下载参数，拼在 CDN 的 <c>download?encrypted_query_param=</c> 后面。</param>
+/// <param name="AesKey">解密密钥的 base64：可能是 16 字节原始密钥，也可能是 32 位十六进制字符串。</param>
+/// <param name="FullUrl">完整的下载地址（服务端直接给出时优先用它）。</param>
+public sealed record CdnMedia(string? EncryptQueryParam, string? AesKey, string? FullUrl);
 
 /// <summary>文字内容。</summary>
 /// <param name="Text">文字。</param>
@@ -92,6 +106,9 @@ public static class ILinkConstants
 
     /// <summary>文字内容。</summary>
     public const int ItemTypeText = 1;
+
+    /// <summary>图片内容。</summary>
+    public const int ItemTypeImage = 2;
 
     /// <summary>语音内容。</summary>
     public const int ItemTypeVoice = 3;

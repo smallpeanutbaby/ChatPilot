@@ -12,6 +12,13 @@ public sealed class NodeReplacedException() : Exception("同一个设备在别�
 /// <summary>
 /// 节点到服务器的长连接：连接 → 握手 → 收指令 / 发结果和事件；断线后指数退避重连（1 秒到 60 秒）。
 /// </summary>
+/// <param name="webSocketUri">服务器的 WebSocket 地址，见 <see cref="ServerEndpoint.WebSocketUri"/>。</param>
+/// <param name="token">设备令牌。</param>
+/// <param name="fingerprint">服务器证书指纹（wss 必填）。</param>
+/// <param name="connector">建立连接的方式（测试里换成内存连接）。</param>
+/// <param name="events">待上报的 agent 事件；断线期间留在队列里，重连后补发。</param>
+/// <param name="execute">执行一条指令并返回结果；抛出的异常会被当成内部错误回给服务器。</param>
+/// <param name="logger">日志。</param>
 public sealed class ServerConnection(
     Uri webSocketUri,
     string token,
@@ -21,9 +28,16 @@ public sealed class ServerConnection(
     Func<NodeCommand, CancellationToken, Task<CommandOutcome>> execute,
     ILogger<ServerConnection> logger)
 {
+    /// <summary>同时执行的指令上限；超过时新指令直接回 <see cref="ErrorCodes.Busy"/>，不排队。</summary>
     private const int MaxConcurrentCommands = 8;
+
+    /// <summary>发出 hello 后等 welcome 最多多久。</summary>
     private static readonly TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>第一次重连前等多久；握手成功后重置成这个值。</summary>
     private static readonly TimeSpan InitialBackoff = TimeSpan.FromSeconds(1);
+
+    /// <summary>重连等待每次翻倍，最多等这么久。</summary>
     private static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(60);
 
     /// <summary>握手成功时触发（测试和日志用）。</summary>
@@ -33,6 +47,8 @@ public sealed class ServerConnection(
     /// 一直运行到取消。返回进程退出码：0 正常退出（包括被另一个实例替换），2 设备令牌被拒绝。
     /// 被替换时以 0 退出，开机自启工具就不会再把它拉起来和另一个实例互相顶替。
     /// </summary>
+    /// <param name="cancellationToken">取消时断开连接、停止重连并返回 0。</param>
+    /// <returns>进程退出码：0 正常退出或被替换，2 设备令牌被拒绝。</returns>
     public async Task<int> RunAsync(CancellationToken cancellationToken)
     {
         var backoff = InitialBackoff;
@@ -86,13 +102,20 @@ public sealed class ServerConnection(
         return 0;
     }
 
+    /// <summary>发 hello（协议版本、节点版本、系统、电脑名、网卡），然后在 <see cref="HandshakeTimeout"/> 内等服务器的 welcome。</summary>
+    /// <param name="socket">刚建立的连接。</param>
+    /// <param name="sendLock">这个连接的发送锁。</param>
+    /// <param name="cancellationToken">取消握手。</param>
+    /// <returns>服务器的 welcome，带最终的设备 ID 和设备名。</returns>
+    /// <exception cref="WireProtocolException">服务器没回 welcome（例如协议版本不一致被关闭）或回了别的消息。</exception>
     private static async Task<WelcomeMessage> HandshakeAsync(WebSocket socket, SemaphoreSlim sendLock, CancellationToken cancellationToken)
     {
         var hello = new HelloMessage(
             ProtocolInfo.Version,
-            typeof(ServerConnection).Assembly.GetName().Version?.ToString(3) ?? "0.0.0",
+            Cli.NodeUpdater.CurrentVersion().ToString(),
             TextChunker.Truncate($"{RuntimeInformation.OSDescription} {RuntimeInformation.OSArchitecture}", 100),
-            TextChunker.Truncate(Environment.MachineName, 64));
+            TextChunker.Truncate(Environment.MachineName, 64),
+            LocalNetwork.Describe());
         await WebSocketMessaging.SendAsync(socket, sendLock, hello, cancellationToken).ConfigureAwait(false);
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -104,6 +127,14 @@ public sealed class ServerConnection(
                 WebSocketCloseStatus.ProtocolError);
     }
 
+    /// <summary>
+    /// 一次连接的会话：后台上报事件，前台逐条收指令、各自并发执行（最多 <see cref="MaxConcurrentCommands"/> 条）。
+    /// 不认识的指令单独回错误、不断开；连接关闭或消息不合规时结束，并等所有在执行的指令和事件上报收尾。
+    /// </summary>
+    /// <param name="socket">握手成功的连接。</param>
+    /// <param name="sendLock">这个连接的发送锁，结果和事件共用。</param>
+    /// <param name="cancellationToken">取消会话。</param>
+    /// <exception cref="NodeReplacedException">服务器以 <see cref="CloseReasons.Replaced"/> 关闭连接。</exception>
     private async Task RunSessionAsync(WebSocket socket, SemaphoreSlim sendLock, CancellationToken cancellationToken)
     {
         using var session = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -171,6 +202,8 @@ public sealed class ServerConnection(
     /// <summary>
     /// 如果无法解析的消息是一条结构正常、只是 op 不认识的指令，返回它的 id；否则返回 null。
     /// </summary>
+    /// <param name="payload">无法解析的原始消息，见 <see cref="WireProtocolException.Payload"/>。</param>
+    /// <returns><c>type</c> 是 <c>command</c> 且 <c>id</c> 是 1–64 个字符的字符串时为这个 id；否则（不是合法 JSON、不是对象、缺字段）为 null。</returns>
     internal static string? UnsupportedCommandId(byte[]? payload)
     {
         if (payload is null)
@@ -195,6 +228,12 @@ public sealed class ServerConnection(
         }
     }
 
+    /// <summary>执行一条指令并回结果；执行抛异常时回 <see cref="ErrorCodes.Internal"/>，会话结束导致的取消不回结果。最后归还并发名额。</summary>
+    /// <param name="socket">当前连接。</param>
+    /// <param name="sendLock">这个连接的发送锁。</param>
+    /// <param name="command">服务器发来的指令。</param>
+    /// <param name="inflight">并发名额，调用前已经占了一个，这里负责释放。</param>
+    /// <param name="cancellationToken">会话的取消令牌。</param>
     private async Task HandleCommandAsync(WebSocket socket, SemaphoreSlim sendLock, CommandMessage command, SemaphoreSlim inflight, CancellationToken cancellationToken)
     {
         try
@@ -222,6 +261,12 @@ public sealed class ServerConnection(
         }
     }
 
+    /// <summary>回一条指令结果；连接已断时只记调试日志，不抛异常。</summary>
+    /// <param name="socket">当前连接。</param>
+    /// <param name="sendLock">这个连接的发送锁。</param>
+    /// <param name="id">指令 ID，见 <see cref="CommandMessage.Id"/>。</param>
+    /// <param name="outcome">执行结果。</param>
+    /// <param name="cancellationToken">取消发送。</param>
     private async Task SendResultAsync(WebSocket socket, SemaphoreSlim sendLock, string id, CommandOutcome outcome, CancellationToken cancellationToken)
     {
         try
@@ -235,6 +280,9 @@ public sealed class ServerConnection(
     }
 
     /// <summary>把待上报事件逐条发出；先看再取，发送失败的事件留在队列里，重连后再发。</summary>
+    /// <param name="socket">当前连接；发送失败时中止它，让会话结束、触发重连。</param>
+    /// <param name="sendLock">这个连接的发送锁。</param>
+    /// <param name="cancellationToken">会话结束时取消。</param>
     private async Task PumpEventsAsync(WebSocket socket, SemaphoreSlim sendLock, CancellationToken cancellationToken)
     {
         try

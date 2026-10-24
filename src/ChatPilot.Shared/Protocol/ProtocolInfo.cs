@@ -32,6 +32,27 @@ public static class ProtocolInfo
 
     /// <summary>一次最多发送的按键数。</summary>
     public const int MaxKeysPerCommand = 20;
+
+    /// <summary>节点下载随指令发来的图片的路径前缀，后面接 <see cref="MediaRef.Id"/>；要带设备令牌。</summary>
+    public const string MediaPath = "/api/media/";
+
+    /// <summary>单张图片的大小上限：10 MiB。</summary>
+    public const int MaxImageBytes = 10 * 1024 * 1024;
+
+    /// <summary>一条指令最多带几张图片。</summary>
+    public const int MaxAttachments = 4;
+
+    /// <summary>
+    /// 节点下载一条指令所带全部图片的时限（秒），不占用发给 agent 的那部分时间。
+    /// 服务器等带图片的指令时，要在普通指令的等待时间上再加这么多。
+    /// </summary>
+    public const int MediaDownloadSeconds = 90;
+
+    /// <summary>一次最多唤醒几个 MAC 地址（一台电脑的网卡数）。</summary>
+    public const int MaxWakeAddresses = 8;
+
+    /// <summary>事件里附带的任务文字最多多少字（只用于历史记录的摘要）。</summary>
+    public const int MaxEventPromptChars = 200;
 }
 
 /// <summary>服务器主动关闭节点连接时使用的原因，节点据此决定是重连还是退出。</summary>
