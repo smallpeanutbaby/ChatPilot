@@ -242,10 +242,18 @@ public sealed class ServerConnection(
             var reader = events.Reader;
             while (await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                while (reader.TryPeek(out var agentEvent))
+                while (reader.TryPeek(out var queued))
                 {
-                    await WebSocketMessaging.SendAsync(socket, sendLock, new AgentEventMessage(agentEvent), cancellationToken).ConfigureAwait(false);
+                    await WebSocketMessaging.SendAsync(socket, sendLock, new AgentEventMessage(queued.Event), cancellationToken).ConfigureAwait(false);
                     reader.TryRead(out _);
+                    try
+                    {
+                        queued.Delivered?.Invoke();
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        logger.LogWarning("事件已发出，但更新本地记录失败：{Message}", ex.Message);
+                    }
                 }
             }
         }

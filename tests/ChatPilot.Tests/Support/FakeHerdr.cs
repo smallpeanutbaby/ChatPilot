@@ -42,6 +42,15 @@ internal sealed class FakeHerdr : IProcessRunner
 
         public long Seq { get; private set; }
 
+        /// <summary>终端 ID；默认由 pane ID 生成，测试"herdr 重启后 pane ID 被别的终端占用"时改掉它。</summary>
+        public string TerminalId
+        {
+            get => _terminalId ?? "term_" + PaneId;
+            set => _terminalId = value;
+        }
+
+        private string? _terminalId;
+
         public required string WorkspaceId { get; init; }
 
         public string Cwd { get; set; } = "/tmp";
@@ -300,6 +309,7 @@ internal sealed class FakeHerdr : IProcessRunner
             state_change_seq = agent.Seq,
             name = agent.Name,
             pane_id = agent.PaneId,
+            terminal_id = agent.TerminalId,
             workspace_id = agent.WorkspaceId,
             cwd = agent.Cwd,
             terminal_title_stripped = agent.Title,

@@ -10,7 +10,9 @@ namespace ChatPilot.Node.Execution;
 public interface IAgentEventSink
 {
     /// <summary>上报一个事件；不能阻塞，也不能抛异常。</summary>
-    void Publish(AgentEvent agentEvent);
+    /// <param name="agentEvent">事件。</param>
+    /// <param name="delivered">事件确实发给服务器之后调用；节点退出前没发出去就不会调用。</param>
+    void Publish(AgentEvent agentEvent, Action? delivered = null);
 }
 
 /// <summary>
@@ -20,6 +22,7 @@ public interface IAgentEventSink
 /// <list type="bullet">
 /// <item>每个 agent 同时最多一个后台跟踪任务（按 pane ID 去重），总数不超过 <see cref="MaxWatchers"/>，防止后台 herdr 进程无限堆积。</item>
 /// <item>任务一旦停下就一定会上报一个事件：整理回复失败时也会上报，内容改为提示用 /read 查看。</item>
+/// <item>跟踪中的任务记在 <see cref="TrackedTasks"/> 里，结果发给服务器之后才删；节点重启后用 <see cref="ResumeTrackedTasks"/> 接着跟踪。</item>
 /// </list>
 /// </remarks>
 public sealed class PromptTracker : IAsyncDisposable
@@ -34,6 +37,10 @@ public sealed class PromptTracker : IAsyncDisposable
     /// <summary>判断指令有没有被吞时读多少行终端输出。</summary>
     private const int DropCheckLines = 200;
 
+    /// <summary>接着跟踪重启前的任务时，herdr 不可用最多重试几次（每次间隔 <see cref="ResumeRetryInterval"/>）。</summary>
+    private const int ResumeAttempts = 20;
+
+    private static readonly TimeSpan ResumeRetryInterval = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(300);
     private static readonly string[] SettledStates = [AgentStatus.Idle, AgentStatus.Done, AgentStatus.Blocked];
     private static readonly string[] ReadyStates = [AgentStatus.Idle, AgentStatus.Done];
@@ -49,6 +56,10 @@ public sealed class PromptTracker : IAsyncDisposable
     private readonly SemaphoreSlim _slots = new(MaxWatchers, MaxWatchers);
     private readonly ConcurrentDictionary<string, string> _pendingInitialPrompts = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _lastPrompts = new(StringComparer.Ordinal);
+    private readonly TrackedTasks _tasks;
+
+    // 结果已经上报、还没发到服务器的任务：跟踪结束时不能删它们的记录。
+    private readonly ConcurrentDictionary<Guid, byte> _awaitingDelivery = new();
     private readonly TimeSpan _initialPromptGrace;
     private readonly TimeSpan _activityTimeout;
 
@@ -62,6 +73,7 @@ public sealed class PromptTracker : IAsyncDisposable
     /// 但 Claude 的界面还在初始化，这时输入的文字会被吞掉。
     /// </param>
     /// <param name="activityTimeout">提交后最多等多久看 agent 有没有开始干活（默认 10 秒）。</param>
+    /// <param name="tasks">跟踪中的任务记录；不传时只记在内存里，重启后不接着跟踪。</param>
     public PromptTracker(
         HerdrClient herdr,
         ReplyService replies,
@@ -69,7 +81,8 @@ public sealed class PromptTracker : IAsyncDisposable
         NodeConfig config,
         ILogger<PromptTracker> logger,
         TimeSpan? initialPromptGrace = null,
-        TimeSpan? activityTimeout = null)
+        TimeSpan? activityTimeout = null,
+        TrackedTasks? tasks = null)
     {
         _herdr = herdr;
         _replies = replies;
@@ -78,6 +91,7 @@ public sealed class PromptTracker : IAsyncDisposable
         _logger = logger;
         _initialPromptGrace = initialPromptGrace ?? TimeSpan.FromSeconds(3);
         _activityTimeout = activityTimeout ?? TimeSpan.FromSeconds(10);
+        _tasks = tasks ?? new TrackedTasks(null, logger);
     }
 
     private TimeSpan WaitLimit => TimeSpan.FromHours(_config.PromptWaitHours);
@@ -106,7 +120,13 @@ public sealed class PromptTracker : IAsyncDisposable
         }
 
         _lastPrompts[agent.PaneId] = text;
+        var task = TrackTask(agent, text);
         var watching = TryWatch(agent, token => FollowPromptAsync(agent, text, token));
+        if (watching == WatchResult.Busy)
+        {
+            _tasks.Remove(task.Id);
+        }
+
         return CommandOutcome.Success(new AckData(watching switch
         {
             WatchResult.Started or WatchResult.AlreadyWatching => "已发送",
@@ -124,7 +144,8 @@ public sealed class PromptTracker : IAsyncDisposable
     public void WatchAfterResponse(HerdrAgent agent)
     {
         ArgumentNullException.ThrowIfNull(agent);
-        TryWatch(agent, async token =>
+        var task = TrackTask(agent, prompt: null);
+        var watching = TryWatch(agent, async token =>
         {
             await Task.Delay(TimeSpan.FromMilliseconds(500), token).ConfigureAwait(false);
 
@@ -157,6 +178,91 @@ public sealed class PromptTracker : IAsyncDisposable
             var settled = await _herdr.WaitAsync(agent.PaneId, SettledStates, WaitLimit, token).ConfigureAwait(false);
             await ReportSettledAsync(settled ?? current, prompt: null, token).ConfigureAwait(false);
         });
+        if (watching == WatchResult.Busy)
+        {
+            _tasks.Remove(task.Id);
+        }
+    }
+
+    /// <summary>
+    /// 节点启动时调用：接着跟踪重启前没做完的任务。还是同一个终端里的同一类 agent 才接着跟踪；
+    /// 它在节点停着的时候已经做完的话，直接上报结果。超过等待上限（<see cref="NodeConfig.PromptWaitHours"/>）的任务丢掉。
+    /// </summary>
+    public void ResumeTrackedTasks()
+    {
+        foreach (var task in _tasks.Snapshot())
+        {
+            Track(() => ResumeAsync(task, _stopping.Token));
+        }
+    }
+
+    private async Task ResumeAsync(TrackedTask task, CancellationToken cancellationToken)
+    {
+        if (DateTimeOffset.UtcNow - task.Since > WaitLimit)
+        {
+            _tasks.Remove(task.Id);
+            return;
+        }
+
+        // 开机自启时 herdr 可能还没起来，多等一会儿。
+        HerdrAgent? agent = null;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                agent = await _herdr.TryGetAgentAsync(task.PaneId, cancellationToken).ConfigureAwait(false);
+                break;
+            }
+            catch (HerdrException ex)
+            {
+                if (attempt >= ResumeAttempts)
+                {
+                    _logger.LogWarning("herdr 一直不可用（{Message}），{Pane} 重启前的任务下次启动再接着跟踪", ex.Message, task.PaneId);
+                    return;
+                }
+
+                _logger.LogDebug("接着跟踪 {Pane} 时 herdr 出错（{Message}），稍后重试", task.PaneId, ex.Message);
+                await Task.Delay(ResumeRetryInterval, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        if (agent is null || agent.Kind != task.Kind || (task.TerminalId is not null && agent.TerminalId != task.TerminalId))
+        {
+            _logger.LogInformation("重启前跟踪的 {Pane} 已经不在了，不再跟踪", task.PaneId);
+            _tasks.Remove(task.Id);
+            return;
+        }
+
+        _logger.LogInformation("接着跟踪 {Agent} 重启前的任务", agent.Name ?? agent.PaneId);
+        var watching = TryWatch(agent, async token =>
+        {
+            if (agent.Status == AgentStatus.Working)
+            {
+                var settled = await _herdr.WaitAsync(agent.PaneId, SettledStates, WaitLimit, token).ConfigureAwait(false);
+                await ReportSettledAsync(settled ?? agent, task.Prompt, token).ConfigureAwait(false);
+            }
+            else if (agent.Status == AgentStatus.Blocked || agent.StateChangeSeq != task.Seq)
+            {
+                // 节点停着的时候它已经做完（或者卡在了确认框上）。
+                await ReportSettledAsync(agent, task.Prompt, token).ConfigureAwait(false);
+            }
+            else
+            {
+                Publish(AgentEventKind.Failed, agent, "节点重启前交给它的任务，到现在都没看到它开始工作，可以用 /read 看看");
+            }
+        });
+        if (watching == WatchResult.Busy)
+        {
+            _logger.LogWarning("同时跟踪的任务已满，{Agent} 重启前的任务下次启动再接着跟踪", agent.Name ?? agent.PaneId);
+        }
+    }
+
+    /// <summary>记下开始跟踪的任务（替换这个 agent 之前的任务）。</summary>
+    private TrackedTask TrackTask(HerdrAgent agent, string? prompt)
+    {
+        var task = new TrackedTask(Guid.NewGuid(), agent.PaneId, agent.TerminalId, agent.Kind, prompt, agent.StateChangeSeq, DateTimeOffset.UtcNow);
+        _tasks.Track(task);
+        return task;
     }
 
     /// <summary>
@@ -250,6 +356,13 @@ public sealed class PromptTracker : IAsyncDisposable
             {
                 _watched.TryRemove(agent.PaneId, out _);
                 _slots.Release();
+
+                // 没上报任何结果就结束了（agent 不见了、确认后直接回到空闲、节点在退出），任务记录也就没用了。
+                // 节点退出时保留：重启后接着跟踪。
+                if (!_stopping.IsCancellationRequested && _tasks.Find(agent.PaneId) is { } task && !_awaitingDelivery.ContainsKey(task.Id))
+                {
+                    _tasks.Remove(task.Id);
+                }
             }
         });
         return WatchResult.Started;
@@ -448,8 +561,22 @@ public sealed class PromptTracker : IAsyncDisposable
         Publish(blocked ? AgentEventKind.Blocked : AgentEventKind.Completed, agent, text);
     }
 
-    private void Publish(AgentEventKind kind, HerdrAgent agent, string? text) =>
-        _sink.Publish(new AgentEvent(kind, agent.ToSummary(workspaceLabel: null), text));
+    /// <summary>上报事件。这个 agent 的任务记录等事件确实发到服务器之后再删，发出之前节点退出的话，重启后会再查一次。</summary>
+    private void Publish(AgentEventKind kind, HerdrAgent agent, string? text)
+    {
+        Action? delivered = null;
+        if (_tasks.Find(agent.PaneId) is { } task)
+        {
+            _awaitingDelivery[task.Id] = 0;
+            delivered = () =>
+            {
+                _tasks.Remove(task.Id);
+                _awaitingDelivery.TryRemove(task.Id, out _);
+            };
+        }
+
+        _sink.Publish(new AgentEvent(kind, agent.ToSummary(workspaceLabel: null), text), delivered);
+    }
 
     /// <summary>登记并运行后台任务；退出时等它们结束（最多 5 秒）。</summary>
     private void Track(Func<Task> work)

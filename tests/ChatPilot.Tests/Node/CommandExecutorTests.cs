@@ -527,22 +527,6 @@ public sealed class CommandExecutorTests : IAsyncDisposable
         var outcome = await _executor.ExecuteAsync(new PromptCommand(agent.PaneId, "继续"), CancellationToken.None);
         Assert.Equal(ErrorCodes.AgentBlocked, outcome.Error?.Code);
     }
-
-    private sealed class RecordingSink : IAgentEventSink
-    {
-        private readonly BlockingCollection<AgentEvent> _queue = [];
-
-        public ConcurrentQueue<AgentEvent> Received { get; } = new();
-
-        public void Publish(AgentEvent agentEvent)
-        {
-            Received.Enqueue(agentEvent);
-            _queue.Add(agentEvent);
-        }
-
-        public Task<AgentEvent> WaitAsync() =>
-            Task.Run(() => _queue.TryTake(out var item, TimeSpan.FromSeconds(10)) ? item : throw new TimeoutException("没有收到事件"));
-    }
 }
 
 /// <summary>节点配置校验和保存（S-06、S-14）。</summary>
