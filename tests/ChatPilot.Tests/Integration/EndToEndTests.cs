@@ -141,8 +141,12 @@ public sealed class EndToEndTests : IAsyncLifetime
         Assert.Contains("不允许的按键", await DevChat.SendAsync(_chat, "/keys tideq ctrl+d"), StringComparison.Ordinal);
         Assert.Contains("已改名为 tq", await DevChat.SendAsync(_chat, "/name tideq tq"), StringComparison.Ordinal);
 
+        // 卡住时节点没有通知过（比如是在电脑上派的活）：第一次 /yes 先把确认框发过来，第二次才按键。
         agent.Status = "blocked";
         herdr.Screen = SampleScreens.TrustDialog;
+        var unseen = await DevChat.SendAsync(_chat, "/yes tq");
+        Assert.Contains("还没发给你看过", unseen, StringComparison.Ordinal);
+        Assert.Contains("Yes, I trust this folder", unseen, StringComparison.Ordinal);
         Assert.Contains("已选择：Yes, I trust this folder", await DevChat.SendAsync(_chat, "/yes tq"), StringComparison.Ordinal);
         Assert.Contains("已按 Esc", await DevChat.SendAsync(_chat, "/no tq"), StringComparison.Ordinal);
     }

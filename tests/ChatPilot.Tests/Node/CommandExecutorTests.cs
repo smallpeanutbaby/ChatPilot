@@ -396,6 +396,7 @@ public sealed class CommandExecutorTests : IAsyncDisposable
     {
         var agent = _herdr.AddAgent("tideq", "TideQ", "blocked");
         _herdr.Screen = SampleScreens.TrustDialog;
+        await ShowDialogToUserAsync(agent);
         var approve = await _executor.ExecuteAsync(new RespondCommand(agent.PaneId, true), CancellationToken.None);
         Assert.Contains("Yes, I trust this folder", Assert.IsType<AckData>(approve.Data).Message, StringComparison.Ordinal);
         Assert.Contains(_herdr.CallsStartingWith("agent", "send-keys"), c => c[^2] == "down" && c[^1] == "enter");
@@ -419,12 +420,96 @@ public sealed class CommandExecutorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Yes_approves_the_dialog_from_the_blocked_notification()
+    {
+        var agent = _herdr.AddAgent("tideq", "TideQ");
+        _herdr.StatusAfterPrompt = "blocked";
+        _herdr.Screen = SampleScreens.PermissionDialog;
+        await _executor.ExecuteAsync(new PromptCommand(agent.PaneId, "删掉 build"), CancellationToken.None);
+        Assert.Equal(AgentEventKind.Blocked, (await _events.WaitAsync()).Kind);
+
+        var approve = await _executor.ExecuteAsync(new RespondCommand(agent.PaneId, true), CancellationToken.None);
+        Assert.Contains("已选择：1. Yes", Assert.IsType<AckData>(approve.Data).Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Yes_shows_a_dialog_the_user_has_not_seen_before_pressing_anything()
+    {
+        // 比如 agent 是在电脑上派的活，卡住时节点没有通知过：先给用户看确认框，第二次 /yes 才按键。
+        var agent = _herdr.AddAgent("tideq", "TideQ", "blocked");
+        _herdr.Screen = SampleScreens.PermissionDialog;
+        var first = await _executor.ExecuteAsync(new RespondCommand(agent.PaneId, true), CancellationToken.None);
+        Assert.Equal(ErrorCodes.AgentBlocked, first.Error?.Code);
+        Assert.Contains("还没发给你看过，没有按任何键", first.Error?.Message, StringComparison.Ordinal);
+        Assert.Contains("rm -rf build", first.Error?.Message, StringComparison.Ordinal);
+        Assert.Empty(_herdr.CallsStartingWith("agent", "send-keys"));
+
+        Assert.True((await _executor.ExecuteAsync(new RespondCommand(agent.PaneId, true), CancellationToken.None)).Ok);
+        Assert.Single(_herdr.CallsStartingWith("agent", "send-keys"));
+    }
+
+    [Fact]
+    public async Task Late_yes_does_not_approve_a_dialog_that_replaced_the_one_shown()
+    {
+        // 审查发现：通知发出后，确认框在电脑上被处理掉、紧接着弹出了新的，迟到的 /yes 同意了用户没看过的新确认框。
+        // herdr 不一定察觉到中间的状态变化（状态序号没变），要靠确认框的内容认出来。
+        var agent = _herdr.AddAgent("tideq", "TideQ", "blocked");
+        _herdr.Screen = SampleScreens.PermissionDialog;
+        await ShowDialogToUserAsync(agent);
+
+        _herdr.Screen = SampleScreens.PermissionDialog.Replace("rm -rf build", "git push --force", StringComparison.Ordinal);
+        var late = await _executor.ExecuteAsync(new RespondCommand(agent.PaneId, true), CancellationToken.None);
+        Assert.Contains("不是同一个了", late.Error?.Message, StringComparison.Ordinal);
+        Assert.Contains("git push --force", late.Error?.Message, StringComparison.Ordinal);
+        Assert.Empty(_herdr.CallsStartingWith("agent", "send-keys"));
+
+        // 新的确认框已经发给用户看了，再回复一次 /yes 就同意它。
+        Assert.True((await _executor.ExecuteAsync(new RespondCommand(agent.PaneId, true), CancellationToken.None)).Ok);
+        Assert.Single(_herdr.CallsStartingWith("agent", "send-keys"));
+    }
+
+    [Fact]
+    public async Task Yes_is_refused_when_the_agent_worked_in_between_even_if_the_dialog_looks_the_same()
+    {
+        var agent = _herdr.AddAgent("tideq", "TideQ", "blocked");
+        _herdr.Screen = SampleScreens.PermissionDialog;
+        await ShowDialogToUserAsync(agent);
+
+        agent.Status = "working";
+        agent.Status = "blocked";
+        var late = await _executor.ExecuteAsync(new RespondCommand(agent.PaneId, true), CancellationToken.None);
+        Assert.Contains("不是同一个了", late.Error?.Message, StringComparison.Ordinal);
+        Assert.Empty(_herdr.CallsStartingWith("agent", "send-keys"));
+    }
+
+    [Fact]
+    public async Task A_shown_dialog_is_approved_at_most_once()
+    {
+        // 连发两次 /yes：第二次不能同意紧接着弹出的确认框，哪怕它看起来一模一样。
+        var agent = _herdr.AddAgent("tideq", "TideQ", "blocked");
+        _herdr.Screen = SampleScreens.PermissionDialog;
+        await ShowDialogToUserAsync(agent);
+
+        Assert.True((await _executor.ExecuteAsync(new RespondCommand(agent.PaneId, true), CancellationToken.None)).Ok);
+        var again = await _executor.ExecuteAsync(new RespondCommand(agent.PaneId, true), CancellationToken.None);
+        Assert.Contains("还没发给你看过", again.Error?.Message, StringComparison.Ordinal);
+        Assert.Single(_herdr.CallsStartingWith("agent", "send-keys"));
+    }
+
+    [Fact]
     public async Task Rename_validates_name()
     {
         var agent = _herdr.AddAgent(null, "x");
         Assert.False((await _executor.ExecuteAsync(new RenameAgentCommand(agent.PaneId, "Bad Name"), CancellationToken.None)).Ok);
         Assert.True((await _executor.ExecuteAsync(new RenameAgentCommand(agent.PaneId, "good"), CancellationToken.None)).Ok);
         Assert.Equal("good", agent.Name);
+    }
+
+    /// <summary>让节点把确认框发给用户看一次：给在等确认的 agent 派活，会收到它的确认框。</summary>
+    private async Task ShowDialogToUserAsync(FakeHerdr.Agent agent)
+    {
+        var outcome = await _executor.ExecuteAsync(new PromptCommand(agent.PaneId, "继续"), CancellationToken.None);
+        Assert.Equal(ErrorCodes.AgentBlocked, outcome.Error?.Code);
     }
 
     private sealed class RecordingSink : IAgentEventSink
