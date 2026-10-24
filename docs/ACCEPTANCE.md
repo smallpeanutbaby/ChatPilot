@@ -29,6 +29,8 @@
 | F-04 | 服务器重启后节点自动重连，不用重新配对 | 本机 |
 | F-05 | `/unpair <设备>` 后，该设备立即断开，旧令牌不能再连接 | 自动 |
 | F-06 | 同一台设备重复连接时，旧连接被新连接替换 | 自动 |
+| F-07 | 同一份配置同时只能运行一个节点：第二个 `chatpilot-node run` 最多等 20 秒，等不到就以退出码 0 退出，不读排队的指令、不连服务器 | 自动（`Second_node_on_the_same_config_exits_without_starting`） |
+| F-08 | `chatpilot-node update` 升级后只重启启动命令正是这个程序、而且正在运行的开机自启服务（Windows 上一起结束留下来的旧节点进程，sudo 下重启原来那个用户的服务）；用户停掉的不打开；重启失败时以非 0 退出，和"没找到服务"说法不同；`/devices` 显示的节点版本和 `chatpilot-node version` 一致 | 自动（`ServiceRestarterTests`，模拟系统命令） |
 
 ### 指令
 

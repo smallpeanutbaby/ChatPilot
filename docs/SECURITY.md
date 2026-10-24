@@ -60,7 +60,7 @@ Telegram ──(HTTPS)──────►├ 服务器 ◄──(TLS + 指纹)
 | — | 按键白名单：只有方向键、回车、Esc、Tab、退格、Ctrl+C、y/n、1–9，不能拼出任意文字 | `Validation.AllowedKeys` | `Only_whitelisted_keys_are_allowed` |
 | — | `/yes` 先读屏幕找选项再导航，不会盲按回车；只选"这一次同意"，带"不再询问 / 全部允许 / 自动接受"等会扩大权限的选项一律不自动选 | `ApprovalNavigator` | `Never_picks_an_option_that_escalates_permissions`、`Plain_yes_is_preferred` |
 | — | `/yes` 只同意给用户看过的确认框（状态序号和确认框内容都要对上），每个只同意一次：迟到或重复的 `/yes` 不会同意用户没看过的新确认框 | `ShownDialogs`、`ApprovalNavigator.Fingerprint` | `Late_yes_does_not_approve_a_dialog_that_replaced_the_one_shown`、`A_shown_dialog_is_approved_at_most_once` |
-| — | 节点升级只在用户自己运行 `chatpilot-node update` 时发生，不能从微信远程触发。只从 GitHub Releases 下载（HTTPS），压缩包要和同一个发布里的 `SHA256SUMS.txt` 对上，新程序在本机试运行通过才替换。校验值防的是下载损坏和传输途中被改，防不了仓库本身被攻破，信任程度和手动下载一样。只重启启动命令里正是这个程序的开机自启服务 | `NodeUpdater`、`ServiceRestarter` | `NodeUpdaterTests` |
+| — | 节点升级只在用户自己运行 `chatpilot-node update` 时发生，不能从微信远程触发。只从 GitHub Releases 下载（HTTPS），压缩包要和同一个发布里的 `SHA256SUMS.txt` 对上，新程序在本机试运行通过才替换。校验值防的是下载损坏和传输途中被改，防不了仓库本身被攻破，信任程度和手动下载一样。只重启启动命令里有一个参数正是这个程序（两边都解析符号链接后按完整路径比较，只是包含这个路径不算）、而且正在运行的开机自启服务，用户自己停掉的不会被打开；调用的系统命令（PowerShell、launchctl、systemctl、id、sudo）都用绝对路径，不会运行当前目录里的同名程序；用 sudo 升级时重启的是原来那个用户的服务；同一个程序同时只能有一个升级在进行 | `NodeUpdater`、`ServiceRestarter` | `NodeUpdaterTests`、`ServiceRestarterTests` |
 | — | 校验正则用 `\z` 结尾（.NET 的 `$` 会放过结尾换行） | `Validation` | `Trailing_newline_does_not_bypass_validation` |
 
 ### 3.4 资源和健壮性
@@ -70,6 +70,7 @@ Telegram ──(HTTPS)──────►├ 服务器 ◄──(TLS + 指纹)
 | S-11 | WebSocket 单条消息 1 MiB、发给 agent 的文字 16 KB、读取行数 1–500、按键一次最多 20 个、HTTP 请求体 64 KB；图片单张 10 MB、暂存最多 4 张 | `WebSocketMessaging`、`ProtocolInfo`、`MediaStore` | `Oversized_frames_close_the_connection`、`Oversized_prompt_is_rejected` |
 | — | 排队的指令每个 agent 最多 10 条、全部最多 50 条，排太久（超过任务等待上限）的丢弃并通知；盯梢只在有盯着的 agent 时才调用 herdr；定时任务最多 20 个，先从状态文件删掉再执行（崩溃后不会重复执行），服务器停机错过超过 10 分钟的不再执行、只通知 | `PromptQueue`、`AgentWatcher`、`Scheduler` | `QueueAndWatchTests`、`Due_jobs_run_like_a_message_and_missed_ones_are_reported` |
 | — | 节点同时跟踪的任务最多 32 个，每个 agent 只有一个后台等待；每台设备的通知每分钟最多 20 条，通知按顺序排队发送 | `PromptTracker`、`DeviceHub`、`Notifier` | `One_watcher_per_agent…`、`Device_events_are_rate_limited_per_minute` |
+| — | 同一份配置同时只能运行一个节点（配置旁边的 `node.lock`，进程退出时系统自动释放）：第二个节点最多等 20 秒，等不到就以 0 退出，不会两个节点一起发排队的指令、互相覆盖状态文件。升级重启时先确认旧节点退出了（Windows 上结束 `Stop-ScheduledTask` 留下来的节点进程）。下载升级包时 60 秒没收到数据或总共超过 30 分钟就放弃，不会一直卡住 | `NodeCli.AcquireInstanceLockAsync`、`ExclusiveFileLock`、`ServiceRestarter`、`NodeUpdater` | `SingleInstanceTests`、`Windows_restart_also_stops_the_node_left_behind…`、`Stalled_download_gives_up_instead_of_hanging` |
 | — | 每条指令有总时间预算，保证在服务器放弃等待前结束；启动失败（包括超时、断线）一定关掉半启动的工作区 | `CommandExecutor` | `Failed_start_closes_the_new_workspace` |
 | — | 主人的消息严格按顺序一条一条处理（先发的 `/use` 一定先生效） | `ChatDispatcher`、`WeChatChannel` | `Messages_in_one_batch_are_handled_strictly_in_order` |
 | — | 后台写文件失败（磁盘满、无权限）只记日志，不会让进程崩溃；普通状态修改是事务式的，写盘失败时内存不变 | `StateStore`、`DeviceHub` | `Disk_write_failures_during_disconnect…`、`Failed_writes_leave_memory_unchanged…` |

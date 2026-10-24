@@ -221,6 +221,8 @@ chatpilot-node doctor     # 自检：版本、herdr、允许的目录、agent �
 
 下面的命令都在解压出来的节点目录里运行，自启用的文件就在程序旁边。
 
+同一份配置同时只能运行一个节点（配置旁边的 `node.lock` 管着）：已经有一个在运行时，再运行 `chatpilot-node run` 会等 20 秒，等不到就退出。它以退出码 0 退出，开机自启工具不会反复把它拉起来；要重启节点，先停掉正在运行的那个。
+
 **Windows**：登录后通过计划任务启动。不要注册成 Windows 服务：服务账户访问不到你的 herdr。
 
 ```powershell
@@ -254,9 +256,9 @@ journalctl --user -u chatpilot-node -f        # 日志
 
 配置、微信绑定、配对关系都在数据目录里，升级不受影响。`/devices` 会显示每台电脑的节点版本。
 
-- 节点：在那台电脑上运行 `chatpilot-node update`（Windows 上是 `C:\Tools\chatpilot\node\chatpilot-node.exe update`）。它会从 GitHub 下载最新版，核对校验值，在这台电脑上试运行一次，然后替换程序；按上面的方式设了开机自启的，会顺便重启节点，正在等的任务接着跟踪。`--check` 只看有没有新版本。程序放在 `/usr/local/bin` 这类需要管理员权限的目录时，用 `sudo chatpilot-node update`。v0.1.0 还没有这个命令，从 0.1.0 升级需要按下面的方式手动换一次。
+- 节点：在那台电脑上运行 `chatpilot-node update`（Windows 上是 `C:\Tools\chatpilot\node\chatpilot-node.exe update`）。它会从 GitHub 下载最新版，核对校验值，在这台电脑上试运行一次，然后替换程序；按上面的方式设了开机自启、节点正在运行的，会顺便重启节点（Windows 上会一起结束停掉计划任务后留下来的旧节点进程），正在等的任务接着跟踪。你自己停掉的节点不会被打开，只提示怎么启动；重启失败时命令以非 0 退出，并告诉你怎么手动重启。`--check` 只看有没有新版本。程序放在 `/usr/local/bin` 这类需要管理员权限的目录时，用 `sudo chatpilot-node update`，重启的仍是你自己账号下的服务。同一个程序同时只能有一个 `update` 在升级。v0.1.0 还没有这个命令，从 0.1.0 升级需要按下面的方式手动换一次。
 - 服务器：按[上面的方式](#服务器linux-云服务器)下载、解压新版本，再运行一次 `install-server.sh`，同样带上 `--public-url`；或者手动 `sudo systemctl stop chatpilot-server` → 替换 `/opt/chatpilot/chatpilot-server` → `sudo systemctl start chatpilot-server`。用 `scp` 上传目录的话，先删掉服务器上的旧目录，否则新目录会被套进旧目录里。
-- 不用 `update` 也可以手动换：下载新版本（或重新打包），停掉节点、替换可执行文件、再启动。Windows 用 `Stop-ScheduledTask` / `Start-ScheduledTask -TaskName ChatPilotNode`，macOS 用 `launchctl kickstart -k gui/$(id -u)/com.chatpilot.node`，Linux 用 `systemctl --user restart chatpilot-node`。
+- 不用 `update` 也可以手动换：下载新版本（或重新打包），停掉节点、替换可执行文件、再启动。Windows 用 `Stop-ScheduledTask -TaskName ChatPilotNode`，再结束留下来的节点进程（`Get-Process chatpilot-node | Stop-Process -Force`：`Stop-ScheduledTask` 只结束外面的 cmd），替换后 `Start-ScheduledTask -TaskName ChatPilotNode`；macOS 用 `launchctl kickstart -k gui/$(id -u)/com.chatpilot.node`，Linux 用 `systemctl --user restart chatpilot-node`。
 
 服务器和节点之间的协议有版本号，升级时尽量两边一起升。新指令（`/diff`、`/stop`、`/close`、`/watch`、`/wake`、排队、图片）需要节点也升级；节点还是旧版时，这些指令会提示"请升级节点"。从旧版升级的服务器，`appsettings.json` 会保留原样，建议手动加上 `"TimeZone": "Asia/Shanghai"`（或你所在的时区），否则 `/at 23:00` 按服务器系统时区计算。
 
