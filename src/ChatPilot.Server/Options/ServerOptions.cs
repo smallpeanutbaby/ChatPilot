@@ -38,6 +38,9 @@ public sealed class ServerOptions
     /// <summary>配对码有效期（分钟）。</summary>
     public int PairingCodeMinutes { get; set; } = 10;
 
+    /// <summary>设备断开多少秒还没连回来，就通知主人"离线了"（恢复时也会通知）；0 表示不通知。</summary>
+    public int OfflineNoticeSeconds { get; set; } = 120;
+
     /// <summary>数据目录的绝对路径。相对路径按程序所在目录解析（开机自启时工作目录通常是 /）。</summary>
     public string ResolvedDataDir =>
         string.IsNullOrWhiteSpace(DataDir)
@@ -91,6 +94,11 @@ public sealed class ServerOptions
         if (PairingCodeMinutes is < 1 or > 60)
         {
             errors.Add("PairingCodeMinutes 必须在 1–60 之间");
+        }
+
+        if (OfflineNoticeSeconds is < 0 or > 86400)
+        {
+            errors.Add("OfflineNoticeSeconds 必须在 0–86400 之间（0 表示不通知）");
         }
 
         return errors;

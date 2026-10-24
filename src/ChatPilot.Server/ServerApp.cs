@@ -115,6 +115,7 @@ public static class ServerApp
         services.AddSingleton<PairingService>();
         services.AddSingleton<ChatChannelRegistry>();
         services.AddSingleton<Notifier>();
+        services.AddSingleton<PresenceNotifier>();
         services.AddSingleton<DeviceHub>();
         services.AddSingleton<ChatDispatcher>();
         services.AddSingleton<DevChannel>();
@@ -183,9 +184,17 @@ public static class ServerApp
             app.MapGet("/dev/events", DevEvents).RequireRateLimiting("dev");
         }
 
-        app.Lifetime.ApplicationStarted.Register(() => LogStartup(app));
+        app.Lifetime.ApplicationStarted.Register(() =>
+        {
+            LogStartup(app);
+            app.Services.GetRequiredService<PresenceNotifier>().Start();
+        });
         app.Lifetime.ApplicationStopping.Register(() =>
-            app.Services.GetRequiredService<DeviceHub>().CloseAllAsync().Wait(TimeSpan.FromSeconds(5)));
+        {
+            // 先停掉离线通知：关闭时断开的设备不算掉线。
+            app.Services.GetRequiredService<PresenceNotifier>().Stop();
+            app.Services.GetRequiredService<DeviceHub>().CloseAllAsync().Wait(TimeSpan.FromSeconds(5));
+        });
     }
 
     private static IResult Pair(PairRequest? request, PairingService pairing)

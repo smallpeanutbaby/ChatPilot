@@ -26,7 +26,19 @@ internal sealed class ChatPilotFactory : WebApplicationFactory<Program>
     /// <summary>测试里用这个请求头模拟远程客户端的 IP。</summary>
     public const string RemoteIpHeader = "X-Test-Remote-Ip";
 
-    private readonly TempDirectory _dataDir = new();
+    private readonly TempDirectory? _ownedDataDir;
+
+    /// <param name="dataDir">数据目录；不传时用一个新的临时目录（测试结束删除）。传入已有目录可以模拟服务器重启。</param>
+    public ChatPilotFactory(string? dataDir = null)
+    {
+        if (dataDir is null)
+        {
+            _ownedDataDir = new TempDirectory();
+            dataDir = _ownedDataDir.Path;
+        }
+
+        DataDir = dataDir;
+    }
 
     public Dictionary<string, string?> Settings { get; } = new()
     {
@@ -42,7 +54,7 @@ internal sealed class ChatPilotFactory : WebApplicationFactory<Program>
 
     public CapturingLoggerProvider Logs { get; } = new();
 
-    public string DataDir => _dataDir.Path;
+    public string DataDir { get; }
 
     public HttpClient CreateDevClient()
     {
@@ -54,7 +66,7 @@ internal sealed class ChatPilotFactory : WebApplicationFactory<Program>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
-        builder.UseSetting("ChatPilot:DataDir", _dataDir.Path);
+        builder.UseSetting("ChatPilot:DataDir", DataDir);
         foreach (var (key, value) in Settings)
         {
             builder.UseSetting(key, value);
@@ -73,7 +85,7 @@ internal sealed class ChatPilotFactory : WebApplicationFactory<Program>
         base.Dispose(disposing);
         if (disposing)
         {
-            _dataDir.Dispose();
+            _ownedDataDir?.Dispose();
         }
     }
 
