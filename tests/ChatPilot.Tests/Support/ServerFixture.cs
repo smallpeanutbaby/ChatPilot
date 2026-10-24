@@ -164,6 +164,9 @@ internal sealed class NodeHarness : IAsyncDisposable
 
     public Task<WelcomeMessage> Welcome => _welcome.Task;
 
+    /// <summary>节点是否还在跟踪（或正在提交）这个 pane 上的任务；这时再派活会排队。</summary>
+    public bool IsTracking(string paneId) => _tracker.IsTracking(paneId);
+
     /// <summary>用配对码配对并启动节点，等到握手成功。</summary>
     public static async Task<NodeHarness> PairAndStartAsync(ChatPilotFactory factory, string deviceName, FakeHerdr? herdr = null)
     {

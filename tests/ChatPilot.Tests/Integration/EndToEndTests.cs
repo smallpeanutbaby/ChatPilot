@@ -183,6 +183,10 @@ public sealed class EndToEndTests : IAsyncLifetime
             () => Task.FromResult(herdr.CallsStartingWith("agent", "prompt").Any(c => c[2] == herdr.Find("butler")?.PaneId && c[3].Contains("herdr --skill", StringComparison.Ordinal))),
             "管家就绪后应该收到初始说明");
 
+        // 初始说明也是一个任务：它还在跟踪时再发文字会排队（慢机器上会碰到），等它做完再发。
+        var butler = herdr.Find("butler")!.PaneId;
+        await DevChat.EventuallyAsync(() => Task.FromResult(!node.IsTracking(butler)), "管家的初始说明应该很快做完");
+
         Assert.Equal("📨 已交给 [mac] 的管家，做完会通知你", await DevChat.SendAsync(_chat, "看看谁闲着"));
     }
 
