@@ -52,6 +52,7 @@ ChatPilot 能让手机远程指挥电脑上的 AI agent 写代码、运行命令
 | — | 按键白名单：只有方向键、回车、Esc、Tab、退格、Ctrl+C、y/n、1–9，不能拼出任意文字 | `Validation.AllowedKeys` | `Only_whitelisted_keys_are_allowed` |
 | — | `/yes` 先读屏幕找选项再导航，不会盲按回车；只选"这一次同意"，带"不再询问 / 全部允许 / 自动接受"等会扩大权限的选项一律不自动选 | `ApprovalNavigator` | `Never_picks_an_option_that_escalates_permissions`、`Plain_yes_is_preferred` |
 | — | `/yes` 只同意给用户看过的确认框（状态序号和确认框内容都要对上），每个只同意一次：迟到或重复的 `/yes` 不会同意用户没看过的新确认框 | `ShownDialogs`、`ApprovalNavigator.Fingerprint` | `Late_yes_does_not_approve_a_dialog_that_replaced_the_one_shown`、`A_shown_dialog_is_approved_at_most_once` |
+| — | 节点升级只在用户自己运行 `chatpilot-node update` 时发生，不能从微信远程触发。只从 GitHub Releases 下载（HTTPS），压缩包要和同一个发布里的 `SHA256SUMS.txt` 对上，新程序在本机试运行通过才替换。校验值防的是下载损坏和传输途中被改，防不了仓库本身被攻破，信任程度和手动下载一样。只重启启动命令里正是这个程序的开机自启服务 | `NodeUpdater`、`ServiceRestarter` | `NodeUpdaterTests` |
 | — | 校验正则用 `\z` 结尾（.NET 的 `$` 会放过结尾换行） | `Validation` | `Trailing_newline_does_not_bypass_validation` |
 
 ### 3.4 资源和健壮性

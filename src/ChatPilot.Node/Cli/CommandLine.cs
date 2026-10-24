@@ -3,7 +3,7 @@ namespace ChatPilot.Node.Cli;
 /// <summary>极简命令行解析：<c>命令 --选项 值 --开关</c>，同名选项可以重复。</summary>
 public sealed class CommandLine
 {
-    private static readonly HashSet<string> Switches = new(StringComparer.Ordinal) { "force", "help" };
+    private static readonly HashSet<string> Switches = new(StringComparer.Ordinal) { "force", "help", "check", "no-restart" };
 
     private readonly Dictionary<string, List<string>> _options = new(StringComparer.Ordinal);
 

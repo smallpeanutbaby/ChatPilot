@@ -127,7 +127,7 @@ public sealed class ChatDispatcher(
 
             if (hub.Session(device.Id) is { } session)
             {
-                builder.Append(" · ").Append(session.HostName).Append(" · ").Append(session.Platform);
+                builder.Append(" · ").Append(session.HostName).Append(" · ").Append(session.Platform).Append(" · 节点 ").Append(session.NodeVersion);
             }
             else
             {

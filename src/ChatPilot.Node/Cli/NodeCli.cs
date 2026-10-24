@@ -10,7 +10,7 @@ using Microsoft.Extensions.Logging;
 
 namespace ChatPilot.Node.Cli;
 
-/// <summary>节点命令行：pair（配对）、run（运行）、doctor（自检）。</summary>
+/// <summary>节点命令行：pair（配对）、run（运行）、doctor（自检）、update（升级）、version（版本）。</summary>
 public static class NodeCli
 {
     private const string Usage = """
@@ -27,6 +27,10 @@ public static class NodeCli
               --force                    覆盖已有的配置
           chatpilot-node run      连接服务器并一直运行
           chatpilot-node doctor   检查配置、herdr 和服务器是否正常
+          chatpilot-node update   从 GitHub 下载最新版，核对校验值后替换程序，并重启开机自启的节点
+              --check                    只看有没有新版本
+              --no-restart               替换后不重启（自己重启）
+          chatpilot-node version  显示版本
 
         通用选项：
           --config <路径>  配置文件，默认 ~/.chatpilot/node.json（也可用环境变量 CHATPILOT_NODE_CONFIG）
@@ -51,11 +55,13 @@ public static class NodeCli
                 "pair" => await PairAsync(cli, configPath).ConfigureAwait(false),
                 "run" => await RunNodeAsync(cli, configPath).ConfigureAwait(false),
                 "doctor" => await DoctorAsync(cli, configPath).ConfigureAwait(false),
+                "update" => await UpdateAsync(cli).ConfigureAwait(false),
+                "version" => Version(),
                 _ => Fail($"不认识的命令：{cli.Command}\n\n{Usage}"),
             };
         }
         catch (Exception ex) when (ex is PairingException or FileNotFoundException or InvalidDataException or IOException
-            or UnauthorizedAccessException or System.Text.Json.JsonException)
+            or UnauthorizedAccessException or System.Text.Json.JsonException or UpdateException)
         {
             return Fail(ex.Message);
         }
@@ -162,6 +168,11 @@ public static class NodeCli
         var config = NodeConfigStore.Load(configPath);
         using var loggerFactory = CreateLoggerFactory();
         var logger = loggerFactory.CreateLogger("ChatPilot.Node");
+        if (Environment.ProcessPath is { } self)
+        {
+            NodeUpdater.CleanUpOldBinaries(self);
+        }
+
         using var stopping = new CancellationTokenSource();
         using var sigint = PosixSignalRegistration.Create(PosixSignal.SIGINT, Stop);
         using var sigterm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, Stop);
@@ -188,7 +199,7 @@ public static class NodeCli
             executor.ExecuteAsync,
             loggerFactory.CreateLogger<ServerConnection>());
 
-        logger.LogInformation("ChatPilot 节点启动：设备 {Device}，服务器 {Server}", config.DeviceName, config.ServerUrl);
+        logger.LogInformation("ChatPilot 节点 {Version} 启动：设备 {Device}，服务器 {Server}", NodeUpdater.CurrentVersion(), config.DeviceName, config.ServerUrl);
         return await connection.RunAsync(stopping.Token).ConfigureAwait(false);
 
         void Stop(PosixSignalContext context)
@@ -208,6 +219,7 @@ public static class NodeCli
 
         var config = NodeConfigStore.Load(configPath);
         var ok = true;
+        Console.WriteLine($"版本：{NodeUpdater.CurrentVersion()}（升级：chatpilot-node update）");
         Console.WriteLine($"配置：{configPath}（设备 {config.DeviceName}）");
 
         var herdr = new HerdrClient(new ProcessRunner(), config.HerdrPath, config.HerdrSession, TimeSpan.FromSeconds(config.CommandTimeoutSeconds));
@@ -253,6 +265,74 @@ public static class NodeCli
         }
 
         return ok ? 0 : 1;
+    }
+
+    private static int Version()
+    {
+        Console.WriteLine($"chatpilot-node {NodeUpdater.CurrentVersion()}（{RuntimeInformation.RuntimeIdentifier}）");
+        return 0;
+    }
+
+    /// <summary>升级到 GitHub 上的最新版本。只有发布版（单文件程序）能升级：用源码运行的，替换掉的只是 dotnet 的启动器。</summary>
+    private static async Task<int> UpdateAsync(CommandLine cli)
+    {
+        cli.RejectUnknown("check", "no-restart", "config");
+        if (cli.Errors.Count > 0)
+        {
+            return Fail(string.Join('\n', cli.Errors));
+        }
+
+        var current = NodeUpdater.CurrentVersion();
+        var self = Environment.ProcessPath;
+        var rid = RuntimeInformation.RuntimeIdentifier;
+        if (self is null || File.Exists(Path.Combine(AppContext.BaseDirectory, "chatpilot-node.dll")))
+        {
+            return Fail("只有发布版（单文件程序）能自动升级；用源码运行的，请拉取最新代码后重新打包");
+        }
+
+        if (!NodeUpdater.SupportedRuntimes.Contains(rid))
+        {
+            return Fail($"这个平台（{rid}）没有发布版，不能自动升级");
+        }
+
+        using var http = NodeUpdater.CreateHttpClient();
+        var updater = new NodeUpdater(http, NodeUpdater.DefaultRepository, rid, self, NodeUpdater.TryRunAsync);
+        Console.WriteLine($"当前版本：{current}，正在查最新版本…");
+        var latest = await updater.GetLatestAsync(CancellationToken.None).ConfigureAwait(false);
+        if (!latest.Version.IsNewerThan(current))
+        {
+            Console.WriteLine($"✅ 已经是最新版本（{current}）");
+            return 0;
+        }
+
+        if (cli.Has("check"))
+        {
+            Console.WriteLine($"有新版本 {latest.Version}。运行 chatpilot-node update 升级");
+            return 0;
+        }
+
+        Console.WriteLine($"下载 {latest.Version}（{NodeUpdater.AssetName(rid)}），核对校验值后替换 {self}…");
+        try
+        {
+            await updater.InstallAsync(latest, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Fail($"没有权限修改 {Path.GetDirectoryName(self)}。换有权限的用户运行，例如 sudo chatpilot-node update");
+        }
+
+        Console.WriteLine($"✅ 已升级到 {latest.Version}");
+        if (cli.Has("no-restart"))
+        {
+            Console.WriteLine("   " + ServiceRestarter.ManualHint());
+            return 0;
+        }
+
+        var restarted = await ServiceRestarter.TryRestartAsync(self, CancellationToken.None).ConfigureAwait(false);
+        Console.WriteLine(restarted is null
+            ? "   没找到运行这个程序的开机自启服务。" + ServiceRestarter.ManualHint()
+            : $"   已重启{restarted}，新版本正在运行。正在等的任务会接着跟踪");
+        return 0;
     }
 
     private static ILoggerFactory CreateLoggerFactory() =>
