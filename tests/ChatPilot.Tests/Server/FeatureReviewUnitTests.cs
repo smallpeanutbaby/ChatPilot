@@ -59,6 +59,10 @@ public class FeatureReviewUnitTests
         Assert.False(StaleCommands.IsStale(now.AddMinutes(-10), now));
         Assert.True(StaleCommands.IsStale(now.AddMinutes(-11), now));
         Assert.False(StaleCommands.IsStale(now.AddMinutes(5), now));
+        Assert.Equal(now, StaleCommands.FromUnixMilliseconds(now.ToUnixTimeMilliseconds()));
+        Assert.Null(StaleCommands.FromUnixMilliseconds(null));
+        Assert.Null(StaleCommands.FromUnixMilliseconds(0));
+        Assert.Null(StaleCommands.FromUnixMilliseconds(long.MaxValue));
 
         Assert.Equal("[图片]", StaleCommands.Summarize(null, attachment: true));
         Assert.Equal("[图片] @a 看看", StaleCommands.Summarize("@a\n看看", attachment: true));

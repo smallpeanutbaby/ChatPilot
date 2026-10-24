@@ -132,6 +132,7 @@ public sealed class ChatDispatcher(
     /// <c>Reply</c> 是执行结果的文字，没有执行时为 null。
     /// </returns>
     /// <exception cref="IOException">状态文件写不进去（任务还在，稍后再试）。</exception>
+    /// <exception cref="UnauthorizedAccessException">没有权限写状态文件（任务还在，稍后再试）。</exception>
     internal Task<(ScheduledJob? Job, string? Reply)> TakeScheduledJobAsync(int jobId, bool execute, CancellationToken cancellationToken) =>
         SerialAsync<(ScheduledJob?, string?)>(async () =>
         {

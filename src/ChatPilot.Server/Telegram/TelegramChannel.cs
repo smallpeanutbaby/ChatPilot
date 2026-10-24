@@ -179,7 +179,7 @@ public sealed class TelegramChannel(
             }
 
             var inbound = ToInbound(message);
-            if (message.Date > 0 && DateTimeOffset.FromUnixTimeSeconds(message.Date) is var sentAt && StaleCommands.IsStale(sentAt, now))
+            if (StaleCommands.FromUnixMilliseconds(message.Date * 1000) is { } sentAt && StaleCommands.IsStale(sentAt, now))
             {
                 stale.Add((sentAt, StaleCommands.Summarize(inbound.Text, inbound.ImageFileId is not null || inbound.Problem is not null)));
             }

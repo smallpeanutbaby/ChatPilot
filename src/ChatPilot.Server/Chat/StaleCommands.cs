@@ -19,6 +19,12 @@ public static class StaleCommands
     /// <summary>每条丢掉的消息在说明里最多显示多少字。</summary>
     private const int MaxSummaryChars = 40;
 
+    /// <summary>把聊天平台给的 Unix 时间（毫秒）换成时间点。</summary>
+    /// <param name="milliseconds">Unix 毫秒；可以为 null。</param>
+    /// <returns>时间点；没有、不是正数或者超出能表示的范围时为 null（当作不知道发送时间，照常处理）。</returns>
+    public static DateTimeOffset? FromUnixMilliseconds(long? milliseconds) =>
+        milliseconds is > 0 and < 253_402_300_800_000 ? DateTimeOffset.FromUnixTimeMilliseconds(milliseconds.Value) : null;
+
     /// <summary>这条消息是不是晚到太久了。</summary>
     /// <param name="sentAt">主人发出消息的时间（聊天平台记下的）。</param>
     /// <param name="now">现在。</param>

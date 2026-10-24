@@ -195,9 +195,9 @@ public sealed class WeChatChannel(
                     continue;
                 }
 
-                if (message.CreateTimeMs is > 0 and var ms && DateTimeOffset.FromUnixTimeMilliseconds(ms) is var sentAt && StaleCommands.IsStale(sentAt, now))
+                if (StaleCommands.FromUnixMilliseconds(message.CreateTimeMs) is { } sentAt && StaleCommands.IsStale(sentAt, now))
                 {
-                    stale.Add((sentAt, StaleCommands.Summarize(items.Select(i => i.Text).FirstOrDefault(t => t is not null), items.Any(i => i.Image is not null))));
+                    stale.Add((sentAt,StaleCommands.Summarize(items.Select(i => i.Text).FirstOrDefault(t => t is not null), items.Any(i => i.Image is not null))));
                 }
                 else
                 {
