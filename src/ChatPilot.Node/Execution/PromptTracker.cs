@@ -48,6 +48,7 @@ public sealed class PromptTracker : IAsyncDisposable
     private readonly ConcurrentDictionary<string, byte> _watched = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _slots = new(MaxWatchers, MaxWatchers);
     private readonly ConcurrentDictionary<string, string> _pendingInitialPrompts = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string> _lastPrompts = new(StringComparer.Ordinal);
     private readonly TimeSpan _initialPromptGrace;
     private readonly TimeSpan _activityTimeout;
 
@@ -99,6 +100,12 @@ public sealed class PromptTracker : IAsyncDisposable
             return CommandExecutor.MapHerdrError(ex);
         }
 
+        if (_lastPrompts.Count >= MaxWatchers * 8)
+        {
+            _lastPrompts.Clear();
+        }
+
+        _lastPrompts[agent.PaneId] = text;
         var watching = TryWatch(agent, token => FollowPromptAsync(agent, text, token));
         return CommandOutcome.Success(new AckData(watching switch
         {
@@ -106,6 +113,9 @@ public sealed class PromptTracker : IAsyncDisposable
             _ => $"已发送（同时跟踪的任务已满 {MaxWatchers} 个，这次做完不会通知，可以用 /read 查看）",
         }));
     }
+
+    /// <summary>最近一次交给这个 agent 的文字（只记在内存里）；读终端取回复时用来定位这一轮从哪里开始。</summary>
+    internal string? LastPrompt(string paneId) => _lastPrompts.GetValueOrDefault(paneId);
 
     /// <summary>
     /// 回应确认框之后继续跟踪：确认框消失后如果 agent 开始干活，就等它做完再上报；

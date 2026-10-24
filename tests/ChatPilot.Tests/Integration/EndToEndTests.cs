@@ -129,6 +129,8 @@ public sealed class EndToEndTests : IAsyncLifetime
         await using var node = await NodeHarness.PairAndStartAsync(_factory, "mac", herdr);
 
         Assert.Contains("⏺ 收到", await DevChat.SendAsync(_chat, "/read tideq 30"), StringComparison.Ordinal);
+        var last = await DevChat.SendAsync(_chat, "/last tideq");
+        Assert.Contains("最近的回复：\n\n收到", last, StringComparison.Ordinal);
 
         var project = node.Root.CreateDirectory("web");
         var created = await DevChat.SendAsync(_chat, $"/new {project} claude webby");

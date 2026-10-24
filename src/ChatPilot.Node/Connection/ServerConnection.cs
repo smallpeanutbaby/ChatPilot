@@ -123,7 +123,7 @@ public sealed class ServerConnection(
                 {
                     // 服务器比节点新、发来了不认识的指令：单独回错误，不断开连接。
                     await SendResultAsync(socket, sendLock, unsupportedId,
-                        CommandOutcome.Failure(ErrorCodes.InvalidArgument, "节点不支持这个指令，请升级节点"), session.Token).ConfigureAwait(false);
+                        CommandOutcome.Failure(ErrorCodes.InvalidArgument, "节点不支持这个指令，请升级节点（在那台电脑上运行 chatpilot-node update）"), session.Token).ConfigureAwait(false);
                     continue;
                 }
                 catch (WireProtocolException ex)

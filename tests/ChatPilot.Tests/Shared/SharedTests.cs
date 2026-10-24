@@ -23,6 +23,7 @@ public class ProtocolTests
         new CommandMessage("5", new SendKeysCommand("tideq", ["down", "enter"])),
         new CommandMessage("6", new RespondCommand("tideq", true)),
         new CommandMessage("7", new RenameAgentCommand("w1:p1", "web")),
+        new CommandMessage("8", new LastReplyCommand("tideq")),
         new ResultMessage("1", CommandOutcome.Success(new AgentListData([new AgentSummary("w1:p1", "tideq", "claude", "idle", "TideQ", "/x", "标题")]))),
         new ResultMessage("2", CommandOutcome.Failure(ErrorCodes.NotFound, "没有")),
         new AgentEventMessage(new AgentEvent(AgentEventKind.Completed, new AgentSummary("w1:p1", null, "claude", "idle", null, null, null), "收到")),

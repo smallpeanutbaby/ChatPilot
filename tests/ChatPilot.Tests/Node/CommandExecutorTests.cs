@@ -497,6 +497,22 @@ public sealed class CommandExecutorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Last_reply_is_read_on_demand_and_says_when_the_agent_is_still_working()
+    {
+        var agent = _herdr.AddAgent("tideq", "TideQ");
+        var idle = await _executor.ExecuteAsync(new LastReplyCommand(agent.PaneId), CancellationToken.None);
+        Assert.Equal("收到", Assert.IsType<TextData>(idle.Data).Text);
+
+        agent.Status = "working";
+        var working = await _executor.ExecuteAsync(new LastReplyCommand(agent.PaneId), CancellationToken.None);
+        Assert.Equal("（它还在干活，这是目前最新的一条）\n\n收到", Assert.IsType<TextData>(working.Data).Text);
+
+        agent.Kind = null;
+        Assert.Equal(ErrorCodes.NotFound, (await _executor.ExecuteAsync(new LastReplyCommand(agent.PaneId), CancellationToken.None)).Error?.Code);
+        Assert.Equal(ErrorCodes.InvalidArgument, (await _executor.ExecuteAsync(new LastReplyCommand("bad target!"), CancellationToken.None)).Error?.Code);
+    }
+
+    [Fact]
     public async Task Rename_validates_name()
     {
         var agent = _herdr.AddAgent(null, "x");

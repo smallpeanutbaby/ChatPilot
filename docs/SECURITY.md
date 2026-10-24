@@ -47,7 +47,7 @@ ChatPilot 能让手机远程指挥电脑上的 AI agent 写代码、运行命令
 | S-07 | `/new` 目录白名单，分两步：先纯字符串检查（展开 `~`、规范化 `..`），不在白名单内的直接拒绝、**不访问文件系统**（避免 Windows 带凭据连 `\\host\share`、macOS 自动挂载 `/net/host`，也不泄露目录是否存在）；再逐级解析符号链接后检查真实路径 | `PathPolicy` | `PathPolicyTests`（含符号链接跳出、`/net/…`） |
 | S-08 | 调 herdr 一律用参数数组，不经过 shell；以 `-` 开头的文字加前导空格防止被 herdr 当成选项；子进程去掉 `HERDR_*` 环境变量；herdr 路径不能是 `.cmd` / `.bat` / `.ps1`（Windows 上会经过 cmd.exe） | `HerdrClient`、`ProcessRunner`、`NodeConfig` | `Prompt_text_is_passed_as_a_single_literal_argument`、`Script_wrappers_are_rejected_as_herdr_path` |
 | — | 发给 agent 的文字只出现在几秒就结束的提交进程里，等待结果用单独的进程，同机其他用户用 `ps` 看不到指令内容 | `HerdrClient.PromptAsync`、`PromptTracker` | `Session_option_is_added_and_prompt_does_not_keep_text…`、真实验收 |
-| S-09 | 协议只有 7 种指令；缺字段、类型不对、嵌套过深都解析失败；结构正常但不认识的指令单独回错误，其他不合规消息断开连接 | `ProtocolJson`、`ServerConnection`、`DeviceHub` | `Unknown_or_malformed_messages_are_rejected`、`Unknown_commands_are_answered_individually…` |
+| S-09 | 协议只有 8 种指令；缺字段、类型不对、嵌套过深都解析失败；结构正常但不认识的指令单独回错误，其他不合规消息断开连接 | `ProtocolJson`、`ServerConnection`、`DeviceHub` | `Unknown_or_malformed_messages_are_rejected`、`Unknown_commands_are_answered_individually…` |
 | S-10 | agent 类型只能是 herdr 内置类型或本机配置的启动器；启动器命令来自本机配置文件，不接受远程输入，不能换行 | `NodeConfig`、`CommandExecutor` | `Start_agent_refuses_paths_outside_whitelist_and_unknown_kinds` |
 | — | 按键白名单：只有方向键、回车、Esc、Tab、退格、Ctrl+C、y/n、1–9，不能拼出任意文字 | `Validation.AllowedKeys` | `Only_whitelisted_keys_are_allowed` |
 | — | `/yes` 先读屏幕找选项再导航，不会盲按回车；只选"这一次同意"，带"不再询问 / 全部允许 / 自动接受"等会扩大权限的选项一律不自动选 | `ApprovalNavigator` | `Never_picks_an_option_that_escalates_permissions`、`Plain_yes_is_preferred` |
