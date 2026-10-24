@@ -200,7 +200,7 @@ public sealed class CommandExecutor(
 
         if (media is null || attachments is null)
         {
-            return await tracker.SubmitAsync(agent, text, cancellationToken).ConfigureAwait(false);
+            return await tracker.SubmitAsync(agent, text, null, cancellationToken).ConfigureAwait(false);
         }
 
         IReadOnlyList<string> saved;
@@ -231,7 +231,7 @@ public sealed class CommandExecutor(
             }
 
             outcome = await RefuseAsync(latest, cancellationToken).ConfigureAwait(false)
-                ?? await tracker.SubmitAsync(latest, AttachmentDownloader.AppendToPrompt(text, saved), cancellationToken).ConfigureAwait(false);
+                ?? await tracker.SubmitAsync(latest, AttachmentDownloader.AppendToPrompt(text, saved), saved, cancellationToken).ConfigureAwait(false);
             return outcome;
         }
         finally

@@ -13,7 +13,10 @@ namespace ChatPilot.Node.Execution;
 /// <param name="Name">排队时 agent 的名字（只用于通知里显示）。</param>
 /// <param name="Text">要发的文字。</param>
 /// <param name="EnqueuedAt">排队时间。</param>
-public sealed record QueuedPrompt(Guid Id, string PaneId, string? TerminalId, string? Kind, string? Name, string Text, DateTimeOffset EnqueuedAt);
+/// <param name="Attachments">这条指令带的、已经存下的图片路径；没发出去就被清掉时删掉这些图片。没有图片时为 null。</param>
+public sealed record QueuedPrompt(
+    Guid Id, string PaneId, string? TerminalId, string? Kind, string? Name, string Text, DateTimeOffset EnqueuedAt,
+    IReadOnlyList<string>? Attachments = null);
 
 /// <summary>
 /// agent 正在干活时发来的指令：按 pane 排队，等它做完一条再发下一条。存在磁盘上（权限 600），节点重启后接着发。
@@ -90,8 +93,9 @@ public sealed class PromptQueue
     /// <param name="agent">要接这条指令的 agent，记下它的 pane、终端 ID、类型和名字。</param>
     /// <param name="text">要发的文字。</param>
     /// <param name="now">排队时间。</param>
+    /// <param name="attachments">这条指令带的、已经存下的图片路径；没有图片时为 null。</param>
     /// <returns>在这个 pane 里排第几；这个 agent 排满 <see cref="MaxPerAgent"/> 条或总数到上限时为 null。</returns>
-    public int? Enqueue(HerdrAgent agent, string text, DateTimeOffset now)
+    public int? Enqueue(HerdrAgent agent, string text, DateTimeOffset now, IReadOnlyList<string>? attachments = null)
     {
         ArgumentNullException.ThrowIfNull(agent);
         lock (_lock)
@@ -102,7 +106,7 @@ public sealed class PromptQueue
                 return null;
             }
 
-            _items.Add(new QueuedPrompt(Guid.NewGuid(), agent.PaneId, agent.TerminalId, agent.Kind, agent.Name, text, now));
+            _items.Add(new QueuedPrompt(Guid.NewGuid(), agent.PaneId, agent.TerminalId, agent.Kind, agent.Name, text, now, attachments is { Count: > 0 } ? attachments : null));
             Save();
             return position;
         }

@@ -157,13 +157,14 @@ public sealed class PromptTracker : IAsyncDisposable
     /// </summary>
     /// <param name="agent">提交前的 agent 状态，用它的状态序号判断之后有没有开始干活。</param>
     /// <param name="text">要交给 agent 的文字。</param>
+    /// <param name="attachments">文字里附带的、已经存下的图片；排队后没发出去就被清掉时删掉它们。没有图片时为 null。</param>
     /// <param name="cancellationToken">
     /// 只用于提交这一步：开始提交前已经取消就不提交；已经开始的 <c>herdr agent prompt</c> 不会因为它中断（见 <see cref="SubmitNowAsync"/>）。
     /// 后台跟踪不受它影响。
     /// </param>
     /// <returns>成功时是给用户看的确认（已发送，或已排队、排第几）；排队已满或 herdr 提交失败时为失败结果。</returns>
     /// <exception cref="OperationCanceledException">开始提交前 <paramref name="cancellationToken"/> 已经取消。</exception>
-    public async Task<CommandOutcome> SubmitAsync(HerdrAgent agent, string text, CancellationToken cancellationToken)
+    public async Task<CommandOutcome> SubmitAsync(HerdrAgent agent, string text, IReadOnlyList<string>? attachments, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(agent);
         bool queued;
@@ -173,7 +174,7 @@ public sealed class PromptTracker : IAsyncDisposable
             queued = agent.Status == AgentStatus.Working || IsBusyLocked(agent.PaneId) || _queue.Count(agent.PaneId) > 0;
             if (queued)
             {
-                position = _queue.Enqueue(agent, text, DateTimeOffset.UtcNow);
+                position = _queue.Enqueue(agent, text, DateTimeOffset.UtcNow, attachments);
             }
             else
             {
@@ -249,10 +250,19 @@ public sealed class PromptTracker : IAsyncDisposable
     internal long? LastReportedSeq(HerdrAgent agent) =>
         _reportedSeq.TryGetValue(agent.PaneId, out var reported) && reported.TerminalId == agent.TerminalId ? reported.Seq : null;
 
-    /// <summary>清空这个 pane 排队的指令，返回清掉了几条。</summary>
+    /// <summary>清空这个 pane 排队的指令（连同它们带的图片），返回清掉了几条。</summary>
     /// <param name="paneId">agent 所在 pane。</param>
     /// <returns>清掉的条数；本来就没有排队时为 0。</returns>
-    public int ClearQueue(string paneId) => _queue.Clear(paneId);
+    public int ClearQueue(string paneId) => Discard(_queue.RemoveWhere(paneId, _ => true));
+
+    /// <summary>排队的指令没发出去就丢掉了：删掉它们带的图片。</summary>
+    /// <param name="dropped">丢掉的指令。</param>
+    /// <returns>丢掉的条数。</returns>
+    private static int Discard(IReadOnlyList<QueuedPrompt> dropped)
+    {
+        AttachmentDownloader.DeleteQuietly(dropped.SelectMany(item => item.Attachments ?? []));
+        return dropped.Count;
+    }
 
     /// <summary>
     /// pane 要被关闭了：停掉它的后台跟踪（之后不再为它上报任何结果），丢掉排队的指令、挂起的初始说明和任务记录。
@@ -275,7 +285,7 @@ public sealed class PromptTracker : IAsyncDisposable
         }
 
         _pendingInitialPrompts.TryRemove(paneId, out _);
-        _queue.Clear(paneId);
+        ClearQueue(paneId);
         if (_tasks.Find(paneId) is { } task)
         {
             _tasks.Remove(task.Id);
@@ -929,6 +939,7 @@ public sealed class PromptTracker : IAsyncDisposable
             {
                 if (_queue.Remove(next.Id))
                 {
+                    Discard([next]);
                     Publish(AgentEventKind.Failed, Placeholder(next), $"排队等了 {_config.PromptWaitHours} 小时还没轮到，这条没有发出：{Summarize(next.Text)}", next);
                 }
 
@@ -983,7 +994,7 @@ public sealed class PromptTracker : IAsyncDisposable
             if (agent is null || !SameAgent(next, agent))
             {
                 var stale = _queue.RemoveWhere(paneId, queued => agent is null || !SameAgent(queued, agent));
-                if (stale.Count > 0)
+                if (Discard(stale) > 0)
                 {
                     Publish(AgentEventKind.Failed, Placeholder(stale[0]), $"它已经不在了，排队的 {stale.Count} 条指令没有发出", stale[0]);
                 }
@@ -1018,6 +1029,12 @@ public sealed class PromptTracker : IAsyncDisposable
                 var outcome = await SubmitNowAsync(latest, next.Text, cancellationToken).ConfigureAwait(false);
                 if (!outcome.Ok)
                 {
+                    // herdr 提交超时的话说不准文字有没有敲进去，图片留着。
+                    if (outcome.Error?.Code != ErrorCodes.Timeout)
+                    {
+                        Discard([next]);
+                    }
+
                     Publish(AgentEventKind.Failed, latest, $"排队的指令没有发出（{outcome.Error?.Message}）：{Summarize(next.Text)}", next);
                 }
                 else if (!_watched.ContainsKey(paneId))

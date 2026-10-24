@@ -245,7 +245,7 @@ public sealed class QueueAndWatchTests : IAsyncDisposable
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _herdr.PromptGate = gate;
         using var deadline = new CancellationTokenSource();
-        var submit = _tracker.SubmitAsync(await _client.GetAgentAsync(agent.PaneId, CancellationToken.None), "一", deadline.Token);
+        var submit = _tracker.SubmitAsync(await _client.GetAgentAsync(agent.PaneId, CancellationToken.None), "一", null, deadline.Token);
         await DevChat.EventuallyAsync(() => Task.FromResult(_herdr.CallsStartingWith("agent", "prompt").Count == 1), "应该开始提交");
 
         await deadline.CancelAsync();
@@ -255,6 +255,23 @@ public sealed class QueueAndWatchTests : IAsyncDisposable
         Assert.Equal(AckData.Sent, Assert.IsType<AckData>((await submit).Data).Message);
         var done = await _events.WaitAsync();
         Assert.Equal((AgentEventKind.Completed, "一"), (done.Kind, done.Prompt));
+    }
+
+    [Fact]
+    public async Task Images_of_a_queued_prompt_are_deleted_when_the_queue_is_cleared()
+    {
+        // 审查：排队的指令被 /stop 清掉（或者过期、agent 不在了）时，它带的图片没人会看了，不能一直留在 agent 的目录里。
+        var agent = _herdr.AddAgent("tideq", "TideQ", "working");
+        agent.Cwd = _temp.CreateDirectory("proj");
+        var executor = MediaExecutor(new FixedHandler(Png));
+        var queued = await executor.ExecuteAsync(new MediaPromptCommand(agent.PaneId, "看图", [PngRef]), CancellationToken.None);
+        Assert.Contains("已排队", Assert.IsType<AckData>(queued.Data).Message, StringComparison.Ordinal);
+        var folder = Path.Combine(agent.Cwd, ".chatpilot", "attachments");
+        Assert.Single(Directory.GetFiles(folder));
+
+        var stopped = await executor.ExecuteAsync(new StopAgentCommand("tideq"), CancellationToken.None);
+        Assert.Equal("已按 Esc 打断它，清空了 1 条排队的指令", Assert.IsType<AckData>(stopped.Data).Message);
+        Assert.Empty(Directory.GetFiles(folder));
     }
 
     [Fact]
@@ -578,6 +595,64 @@ public sealed class AttachmentDownloaderTests : IDisposable
     }
 
     [Fact]
+    public async Task Links_in_the_agent_directory_are_not_followed()
+    {
+        // 审查：克隆的仓库里带了 .chatpilot -> ../别的目录（或者 .gitignore 是个链接），不能把 .gitignore 和图片写到那边去。
+        var downloader = new AttachmentDownloader(new HttpClient(new StubHandler(Png)), new Uri("https://example.com"), "tok", _temp.Combine("fallback"));
+        var project = _temp.CreateDirectory("proj");
+        var elsewhere = _temp.CreateDirectory("elsewhere");
+        if (!TryLinkDirectory(Path.Combine(project, ".chatpilot"), elsewhere))
+        {
+            return;
+        }
+
+        var saved = await downloader.SaveAsync([Ref(Png)], project, CancellationToken.None);
+        Assert.StartsWith(_temp.Combine("fallback"), Assert.Single(saved), StringComparison.Ordinal);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(elsewhere));
+
+        // .chatpilot 是真目录、里面的 .gitignore 是指向别处（还不存在）的链接：同样不写。
+        var other = _temp.CreateDirectory("other");
+        Directory.CreateDirectory(Path.Combine(other, ".chatpilot"));
+        try
+        {
+            File.CreateSymbolicLink(Path.Combine(other, ".chatpilot", ".gitignore"), Path.Combine(elsewhere, ".gitignore"));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return;
+        }
+
+        saved = await downloader.SaveAsync([Ref(Png)], other, CancellationToken.None);
+        Assert.StartsWith(_temp.Combine("fallback"), Assert.Single(saved), StringComparison.Ordinal);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(elsewhere));
+    }
+
+    [Fact]
+    public async Task Old_images_are_cleaned_up_and_only_saved_images_are_ever_deleted()
+    {
+        var downloader = new AttachmentDownloader(new HttpClient(new StubHandler(Png)), new Uri("https://example.com"), "tok", _temp.Combine("fallback"));
+        var project = _temp.CreateDirectory("proj");
+        var folder = _temp.CreateDirectory("proj", ".chatpilot", "attachments");
+        var old = Path.Combine(folder, "20200101-000000-1-abcdef.png");
+        var recent = Path.Combine(folder, "20200101-000000-2-abcdef.png");
+        var foreign = Path.Combine(folder, "notes.txt");
+        File.WriteAllBytes(old, Png);
+        File.SetLastWriteTimeUtc(old, DateTime.UtcNow - AttachmentDownloader.RetentionPeriod - TimeSpan.FromHours(1));
+        File.WriteAllBytes(recent, Png);
+        File.WriteAllText(foreign, "x");
+        File.SetLastWriteTimeUtc(foreign, DateTime.UtcNow.AddYears(-1));
+
+        await downloader.SaveAsync([Ref(Png)], project, CancellationToken.None);
+        Assert.False(File.Exists(old));
+        Assert.True(File.Exists(recent));
+        Assert.True(File.Exists(foreign));
+
+        // 排队记录在磁盘上，路径可能被改过：不是节点自己起名的图片一律不删。
+        AttachmentDownloader.DeleteQuietly([foreign]);
+        Assert.True(File.Exists(foreign));
+    }
+
+    [Fact]
     public async Task Images_already_saved_are_removed_when_a_later_one_fails()
     {
         var downloader = new AttachmentDownloader(new HttpClient(new StubHandler(Png)), new Uri("https://example.com"), "tok", _temp.Combine("fallback"));
@@ -588,6 +663,33 @@ public sealed class AttachmentDownloaderTests : IDisposable
     }
 
     private static MediaRef Ref(byte[] data) => new("abc123", data.Length, Convert.ToHexStringLower(SHA256.HashData(data)));
+
+    /// <summary>建一个指向 <paramref name="target"/> 的目录链接；Windows 上没有建符号链接的权限时改用目录联接。都建不了时返回 false（跳过测试）。</summary>
+    private static bool TryLinkDirectory(string link, string target)
+    {
+        try
+        {
+            Directory.CreateSymbolicLink(link, target);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                return false;
+            }
+        }
+
+        var info = new ProcessStartInfo("cmd.exe") { RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+        foreach (var arg in new[] { "/c", "mklink", "/J", link, target })
+        {
+            info.ArgumentList.Add(arg);
+        }
+
+        using var process = Process.Start(info)!;
+        process.WaitForExit(10_000);
+        return process.ExitCode == 0 && Directory.Exists(link);
+    }
 
     private sealed class StubHandler(byte[]? body) : HttpMessageHandler
     {
