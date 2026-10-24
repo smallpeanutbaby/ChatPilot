@@ -18,6 +18,7 @@ public static class ReplyFormatter
         /ls [设备]         列出 agent（带序号）
         @目标 内容         把任务交给 agent
         /read 目标 [行数]   看最近的输出
+        /last 目标         补看最近一条回复
         /new [设备] 目录 [类型] [名字]
                           新开工作区并启动 agent
         /yes 目标 · /no 目标  同意 / 拒绝确认框
@@ -66,6 +67,10 @@ public static class ReplyFormatter
             _ => $"❌ [{deviceName}] {name} 出错了：{text}",
         };
     }
+
+    /// <summary><c>/last</c> 的回复：和做完时的通知用同样的长度上限。</summary>
+    public static string LastReply(string label, string text) =>
+        $"💬 {label} 最近的回复：\n\n{TextChunker.Truncate(text, MaxEventTextChars)}";
 
     /// <summary>失败结果的回复文字。</summary>
     public static string Failure(CommandOutcome outcome)

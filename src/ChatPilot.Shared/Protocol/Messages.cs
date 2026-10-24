@@ -49,6 +49,7 @@ public sealed record AgentEventMessage(AgentEvent Event) : WireMessage;
 [JsonDerivedType(typeof(SendKeysCommand), "send_keys")]
 [JsonDerivedType(typeof(RespondCommand), "respond")]
 [JsonDerivedType(typeof(RenameAgentCommand), "rename_agent")]
+[JsonDerivedType(typeof(LastReplyCommand), "last_reply")]
 public abstract record NodeCommand;
 
 /// <summary>列出节点上所有 agent。</summary>
@@ -85,6 +86,10 @@ public sealed record RespondCommand(string Target, bool Approve) : NodeCommand;
 /// <param name="Target">pane ID 或 agent 名字。</param>
 /// <param name="Name">新名字，必须符合 <see cref="Validation.IsAgentName"/>。</param>
 public sealed record RenameAgentCommand(string Target, string Name) : NodeCommand;
+
+/// <summary>取 agent 最近一条回复（和做完时推送的内容一样），用来补看没收到的通知。</summary>
+/// <param name="Target">pane ID 或 agent 名字。</param>
+public sealed record LastReplyCommand(string Target) : NodeCommand;
 
 /// <summary>指令结果：成功时带 <see cref="Data"/>，失败时带 <see cref="Error"/>。</summary>
 /// <param name="Ok">是否成功。</param>

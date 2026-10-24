@@ -48,6 +48,7 @@ public sealed class CommandExecutor(
                 SendKeysCommand keys => await SendKeysAsync(keys, token).ConfigureAwait(false),
                 RespondCommand respond => await RespondAsync(respond, token).ConfigureAwait(false),
                 RenameAgentCommand rename => await RenameAsync(rename, token).ConfigureAwait(false),
+                LastReplyCommand last => await LastReplyAsync(last, token).ConfigureAwait(false),
                 _ => CommandOutcome.Failure(ErrorCodes.InvalidArgument, "不支持的指令"),
             };
         }
@@ -351,6 +352,33 @@ public sealed class CommandExecutor(
         await herdr.SendKeysAsync(agent.PaneId, plan.Keys, cancellationToken).ConfigureAwait(false);
         tracker.WatchAfterResponse(agent);
         return CommandOutcome.Success(new AckData($"已选择：{plan.OptionText}"));
+    }
+
+    /// <summary>
+    /// 最近一条回复，取法和做完时推送的一样（能读会话记录就读记录）。微信的通知不保证送达，用它补看。
+    /// agent 还没停下时，取到的是目前最新的一条，前面加一句说明。
+    /// </summary>
+    private async Task<CommandOutcome> LastReplyAsync(LastReplyCommand command, CancellationToken cancellationToken)
+    {
+        if (InvalidTarget(command.Target) is { } invalid)
+        {
+            return invalid;
+        }
+
+        var agent = await herdr.GetAgentAsync(command.Target, cancellationToken).ConfigureAwait(false);
+        if (agent.Kind is null)
+        {
+            return CommandOutcome.Failure(ErrorCodes.NotFound, "这个 pane 里没有识别出 agent");
+        }
+
+        var reply = await replies.GetLastReplyAsync(agent, tracker.LastPrompt(agent.PaneId), cancellationToken).ConfigureAwait(false);
+        var note = agent.Status switch
+        {
+            AgentStatus.Working => "（它还在干活，这是目前最新的一条）\n\n",
+            AgentStatus.Blocked => "（它正在等你确认，确认框用 /read 查看）\n\n",
+            _ => "",
+        };
+        return CommandOutcome.Success(new TextData(note + reply));
     }
 
     private async Task<CommandOutcome> RenameAsync(RenameAgentCommand command, CancellationToken cancellationToken)

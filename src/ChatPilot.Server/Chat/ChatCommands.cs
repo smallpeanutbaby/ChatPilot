@@ -62,6 +62,10 @@ public sealed record ChatList(string? Device) : ChatCommand;
 /// <param name="Lines">行数。</param>
 public sealed record ChatRead(TargetRef Target, int Lines) : ChatCommand;
 
+/// <summary><c>/last 目标</c>：补看 agent 最近一条回复。</summary>
+/// <param name="Target">目标 agent。</param>
+public sealed record ChatLast(TargetRef Target) : ChatCommand;
+
 /// <summary><c>@目标 内容</c>：把任务交给 agent。</summary>
 /// <param name="Target">目标 agent。</param>
 /// <param name="Text">任务内容（原样保留换行和符号）。</param>
@@ -162,6 +166,7 @@ public static class ChatCommandParser
             "use" or "切换" => args.Count == 1 ? new ChatUse(args[0]) : Usage("/use 设备名"),
             "ls" or "list" or "列表" => args.Count <= 1 ? new ChatList(args.FirstOrDefault()) : Usage("/ls [设备名]"),
             "read" or "r" or "看" => ParseRead(args),
+            "last" or "回复" => args.Count == 1 && TargetRef.TryParse(args[0]) is { } target ? new ChatLast(target) : Usage("/last 目标"),
             "new" or "新建" => ParseNew(args),
             "yes" or "y" or "ok" or "同意" => ParseRespond(args, approve: true),
             "no" or "n" or "拒绝" => ParseRespond(args, approve: false),

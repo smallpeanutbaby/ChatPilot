@@ -82,6 +82,7 @@ public sealed class ChatDispatcher(
                 ChatUse use => Use(use.Device),
                 ChatList list => await ListAsync(list.Device, cancellationToken).ConfigureAwait(false),
                 ChatRead read => await ReadAsync(read, cancellationToken).ConfigureAwait(false),
+                ChatLast last => await LastReplyAsync(last, cancellationToken).ConfigureAwait(false),
                 ChatPrompt prompt => await PromptAsync(prompt, cancellationToken).ConfigureAwait(false),
                 ChatButlerPrompt butler => await ButlerPromptAsync(butler.Text, cancellationToken).ConfigureAwait(false),
                 ChatNew create => await NewAsync(create, cancellationToken).ConfigureAwait(false),
@@ -256,6 +257,21 @@ public sealed class ChatDispatcher(
             .ConfigureAwait(false);
         return outcome is { Ok: true, Data: TextData data }
             ? $"🖥 {resolved.Label} 最近的输出：\n\n{data.Text}"
+            : ReplyFormatter.Failure(outcome);
+    }
+
+    private async Task<string> LastReplyAsync(ChatLast command, CancellationToken cancellationToken)
+    {
+        var (resolved, error) = await ResolveAsync(command.Target, cancellationToken).ConfigureAwait(false);
+        if (resolved is null)
+        {
+            return "❓ " + error;
+        }
+
+        var outcome = await hub.SendAsync(resolved.Device.Id, new LastReplyCommand(resolved.Target), CommandTimeout, cancellationToken)
+            .ConfigureAwait(false);
+        return outcome is { Ok: true, Data: TextData data }
+            ? ReplyFormatter.LastReply(resolved.Label, data.Text)
             : ReplyFormatter.Failure(outcome);
     }
 
