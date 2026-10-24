@@ -163,3 +163,22 @@ HTTP 接口：
 | 从终端提取回复不够准 | 优先读会话记录；建议安装 herdr 的 Claude 集成（`herdr integration install claude`） |
 | herdr 在 Windows 上的差异 | 只依赖文档里写明的 CLI；路径比较考虑大小写 |
 | 节点或服务器重启后，正在等的任务丢失 | 本期接受这个限制；重启后用 `/ls`、`/read` 查看状态 |
+
+## 8. 第二期
+
+第一期"本期不做"里的图片消息、订阅 herdr 全局事件，以及风险里提到的备用聊天通道，在第二期做了。验收标准见 `ACCEPTANCE.md` 的 F-40 到 F-53、S-17 到 S-21。
+
+| 功能 | 放在哪一层 | 要点 |
+|---|---|---|
+| 不写目标 / `/re` | 服务器 `ConversationState` | 记住最近打过交道的 agent 和还没处理的确认框；`/yes` 有多个候选时不猜 |
+| 排队 | 节点 `PromptQueue`、`PromptTracker` | agent 忙时排队，每个 pane 一个后台泵，空闲且没有别的跟踪时逐条发出；存盘，重启后接着发 |
+| `/stop`、`/close` | 节点 `CommandExecutor` + 服务器确认 | `/stop` 只在工作中按 Esc；`/close` 服务器端两步确认、pane 对得上才关 |
+| `/watch` | 节点 `AgentWatcher` | 有盯着的 agent 时轮询 `agent list` 看状态变化；跟踪方上报过的不重复通知 |
+| `/diff` | 节点 `GitInspector` | 只读 git 命令，关掉外部 diff / textconv / fsmonitor |
+| `/pending`、`/history` | 服务器 | 列表数据来自节点（排队数、任务开始时间）；记录只存摘要 |
+| `/at` | 服务器 `Scheduler` | 存在状态文件里；先删后执行，错过太久不执行；按 `TimeZone` 计算时刻 |
+| 图片 | 服务器 `MediaStore` + 节点 `AttachmentDownloader` | 微信 CDN 下载并 AES-128-ECB 解密；节点凭设备令牌从服务器取，存到 `.chatpilot/attachments/` |
+| `/wake` | 节点 `LocalNetwork` | 握手时报告网卡，服务器挑同一网段的在线设备广播唤醒包 |
+| Telegram | 服务器 `TelegramChannel` | 和微信并列的聊天通道，只认配置的主人，通知两边都发 |
+
+协议版本号没有变：新增的字段都是可选的，旧节点收到不认识的指令会单独回"请升级节点"，不会断开连接。

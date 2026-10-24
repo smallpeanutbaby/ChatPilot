@@ -248,6 +248,12 @@ internal sealed class FakeHerdr : IProcessRunner
                 });
             }
 
+            case "pane close":
+                lock (_lock)
+                {
+                    return _agents.RemoveAll(x => x.PaneId == a[2]) > 0 ? Ok(new { type = "ok" }) : Error("pane_not_found", $"pane {a[2]} not found");
+                }
+
             case "workspace close":
                 lock (_lock)
                 {

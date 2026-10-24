@@ -1,8 +1,11 @@
 using System.Collections.Concurrent;
 using System.Globalization;
+using System.Net;
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using ChatPilot.Server.Chat;
 using ChatPilot.Server.State;
+using ChatPilot.Shared;
 using ChatPilot.Shared.Protocol;
 
 namespace ChatPilot.Server.Devices;
@@ -23,9 +26,17 @@ public sealed record DeviceSession(string DeviceId, string HostName, string Plat
 /// <item>同一台设备再次连接时，新连接替换旧连接（旧连接收到 <see cref="CloseReasons.Replaced"/>）。</item>
 /// <item>设备上报的事件按顺序排队转发，每台设备每分钟最多 <see cref="MaxEventsPerMinute"/> 条，防止刷屏。</item>
 /// <item>上线、真正下线（不是被新连接替换）时告诉 <see cref="PresenceNotifier"/>，由它决定要不要通知主人。</item>
+/// <item>转发的事件同时记进对话上下文（<see cref="ConversationState"/>）和任务记录（<see cref="TaskHistory"/>）。</item>
 /// </list>
 /// </remarks>
-public sealed class DeviceHub(StateStore store, Notifier notifier, PresenceNotifier presence, TimeProvider time, ILogger<DeviceHub> logger)
+public sealed class DeviceHub(
+    StateStore store,
+    Notifier notifier,
+    PresenceNotifier presence,
+    ConversationState conversation,
+    TaskHistory history,
+    TimeProvider time,
+    ILogger<DeviceHub> logger)
 {
     /// <summary>每台设备每分钟最多转发的事件数。</summary>
     internal const int MaxEventsPerMinute = 20;
@@ -122,7 +133,7 @@ public sealed class DeviceHub(StateStore store, Notifier notifier, PresenceNotif
         }
 
         presence.Connected(device);
-        TouchLastSeen(device.Id);
+        TouchLastSeen(device.Id, SanitizeNetworks(hello.Networks));
         logger.LogInformation("设备 {Device} 上线（{Host}，{Platform}）", device.Name, session.HostName, session.Platform);
 
         try
@@ -195,14 +206,18 @@ public sealed class DeviceHub(StateStore store, Notifier notifier, PresenceNotif
             return;
         }
 
+        conversation.OnEvent(device.Id, device.Name, agentEvent);
+        history.Record(device.Name, agentEvent, time.GetUtcNow());
         notifier.Enqueue(ReplyFormatter.AgentEvent(device.Name, agentEvent));
     }
 
     /// <summary>
-    /// 更新"最后在线时间"。这是非关键数据，而且会在连接清理阶段（finally）调用，
+    /// 更新"最后在线时间"（上线时顺便记下网卡）。这是非关键数据，而且会在连接清理阶段（finally）调用，
     /// 写文件失败（磁盘满、没有权限）时只记日志，不能把异常抛出去拖垮进程。
     /// </summary>
-    private void TouchLastSeen(string deviceId)
+    /// <param name="deviceId">设备 ID。</param>
+    /// <param name="networks">节点报告的网卡；为 null 时保留原来记下的。</param>
+    private void TouchLastSeen(string deviceId, IReadOnlyList<NetworkInterfaceInfo>? networks = null)
     {
         var now = time.GetUtcNow();
         var saved = store.UpdateBestEffort(state =>
@@ -210,13 +225,25 @@ public sealed class DeviceHub(StateStore store, Notifier notifier, PresenceNotif
             var index = state.Devices.FindIndex(d => d.Id == deviceId);
             if (index >= 0)
             {
-                state.Devices[index] = state.Devices[index] with { LastSeenAt = now };
+                var current = state.Devices[index];
+                state.Devices[index] = current with { LastSeenAt = now, Networks = networks ?? current.Networks };
             }
         });
         if (!saved)
         {
             logger.LogWarning("保存设备最后在线时间失败（磁盘写入失败），只更新了内存");
         }
+    }
+
+    /// <summary>只留格式正确的网卡信息（最多 <see cref="ProtocolInfo.MaxWakeAddresses"/> 块）；节点没报告或一块都不对时返回 null。</summary>
+    internal static IReadOnlyList<NetworkInterfaceInfo>? SanitizeNetworks(IReadOnlyList<NetworkInterfaceInfo>? networks)
+    {
+        var valid = (networks ?? [])
+            .Where(n => n is not null && Validation.IsMacAddress(n.Mac) && n.PrefixLength is >= 0 and <= 32
+                && (n.Address is null || (IPAddress.TryParse(n.Address, out var ip) && ip.AddressFamily == AddressFamily.InterNetwork)))
+            .Take(ProtocolInfo.MaxWakeAddresses)
+            .ToList();
+        return valid.Count > 0 ? valid : null;
     }
 
     private static string Clip(string? value, int max) =>

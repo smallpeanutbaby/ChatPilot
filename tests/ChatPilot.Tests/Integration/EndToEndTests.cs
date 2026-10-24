@@ -186,7 +186,8 @@ public sealed class EndToEndTests : IAsyncLifetime
     public async Task Bad_input_returns_usage_not_errors()
     {
         // F-22
-        Assert.StartsWith("❓ 用法：/read", await DevChat.SendAsync(_chat, "/read"), StringComparison.Ordinal);
+        Assert.StartsWith("❓ 用法：/read", await DevChat.SendAsync(_chat, "/read a b c"), StringComparison.Ordinal);
+        Assert.StartsWith("❓ 还没有打过交道的 agent", await DevChat.SendAsync(_chat, "/read"), StringComparison.Ordinal);
         Assert.StartsWith("❓ 不认识的指令", await DevChat.SendAsync(_chat, "/what"), StringComparison.Ordinal);
         Assert.Contains("ChatPilot 指令", await DevChat.SendAsync(_chat, "/help"), StringComparison.Ordinal);
         Assert.Contains("没有在线的设备", await DevChat.SendAsync(_chat, "@x hi"), StringComparison.Ordinal);

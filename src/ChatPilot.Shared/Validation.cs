@@ -45,6 +45,27 @@ public static partial class Validation
     /// <summary>是否在按键白名单 <see cref="AllowedKeys"/> 内。</summary>
     public static bool IsAllowedKey(string? value) => value is not null && AllowedKeys.Contains(value);
 
+    /// <summary>MAC 地址，格式固定为 <c>AA:BB:CC:DD:EE:FF</c>（大写十六进制、冒号分隔）。</summary>
+    public static bool IsMacAddress(string? value) => value is not null && MacAddressRegex().IsMatch(value);
+
+    /// <summary>
+    /// <c>/diff</c> 的文件路径：相对路径，不能以 <c>-</c> 或 <c>/</c> 开头，不能有 <c>..</c>、盘符、控制字符。
+    /// 只是把明显不对的挡在节点之外；git 用 <c>--literal-pathspecs</c> 按字面解释，越不出仓库。
+    /// </summary>
+    public static bool IsRepoRelativePath(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 300 || value[0] is '-' or '/' or '\\' || value.Contains(':', StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return !value.Any(char.IsControl)
+            && value.Split('/', '\\').All(segment => segment != "..");
+    }
+
+    [GeneratedRegex(@"^[0-9A-F]{2}(:[0-9A-F]{2}){5}\z", RegexOptions.CultureInvariant)]
+    private static partial Regex MacAddressRegex();
+
     [GeneratedRegex(@"^[a-z][a-z0-9_-]{0,31}\z", RegexOptions.CultureInvariant)]
     private static partial Regex AgentNameRegex();
 

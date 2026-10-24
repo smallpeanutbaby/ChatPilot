@@ -22,6 +22,9 @@ internal sealed class FakeILink : HttpMessageHandler
 
     public Channel<object> Updates { get; } = Channel.CreateUnbounded<object>();
 
+    /// <summary>微信 CDN 上的文件（加密后的字节），按下载参数 encrypted_query_param 取。</summary>
+    public ConcurrentDictionary<string, byte[]> Cdn { get; } = new(StringComparer.Ordinal);
+
     public int Count(string path) => Requests.Count(r => r.Uri.AbsolutePath == path);
 
     public IReadOnlyList<Request> Sent => Requests.Where(r => r.Uri.AbsolutePath == "/ilink/bot/sendmessage").ToList();
@@ -47,6 +50,14 @@ internal sealed class FakeILink : HttpMessageHandler
         if (chunked)
         {
             return new HttpResponseMessage(HttpStatusCode.PreconditionFailed);
+        }
+
+        if (uri.AbsolutePath == "/c2c/download")
+        {
+            var param = Uri.UnescapeDataString(uri.Query.TrimStart('?').Split('=', 2)[1]);
+            return Cdn.TryGetValue(param, out var file)
+                ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(file) }
+                : new HttpResponseMessage(HttpStatusCode.NotFound);
         }
 
         object response = uri.AbsolutePath switch

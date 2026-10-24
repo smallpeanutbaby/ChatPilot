@@ -16,21 +16,33 @@ public static class ReplyFormatter
         /devices          设备列表
         /use 设备          切换默认设备
         /ls [设备]         列出 agent（带序号）
-        @目标 内容         把任务交给 agent
-        /read 目标 [行数]   看最近的输出
-        /last 目标         补看最近一条回复
+        /pending          待办：谁在等确认、谁在干活
+        @目标 内容         把任务交给 agent（它在忙就排队）
+        /re 内容           交给最近打过交道的 agent
+        /read [目标] [行数] 看最近的输出
+        /last [目标]       补看最近一条回复
+        /diff [目标] [文件] 看 git 改动
+        /yes [目标] · /no [目标]  同意 / 拒绝确认框
+        /keys 目标 按键…    发送按键（如 down enter）
+        /stop [目标]       打断它，清空排队的指令
+        /close 目标        关闭 agent（会先让你确认）
         /new [设备] 目录 [类型] [名字]
                           新开工作区并启动 agent
-        /yes 目标 · /no 目标  同意 / 拒绝确认框
-        /keys 目标 按键…    发送按键（如 down enter）
         /name 目标 新名字   给 agent 改名
+        /watch [目标|all]  盯着：电脑上派的活做完也通知
+        /unwatch 目标|all  不再盯着
+        /at 时间 内容       定时派活（/at 23:00 @api 跑测试）
+        /history [条数]    最近做完的任务
         /butler [设备]     创建管家 agent
+        /wake 设备         唤醒睡着的电脑
         /pair [设备名]     生成配对码
         /unpair 设备       撤销设备
 
         目标可以是 /ls 里的序号、名字、工作区名或 pane ID，
         前面加「设备/」可指定设备，例如 @mac/tideq。
+        不写目标时用最近打过交道的 agent；/yes、/no 优先用在等确认的那个。
         直接发文字（不带 / 或 @）会交给当前设备的管家。
+        先发图片再派活，图片会一起交给 agent（/drop 丢掉）。
         """;
 
     /// <summary>agent 状态对应的图标。</summary>
@@ -60,12 +72,15 @@ public static class ReplyFormatter
         var name = agentEvent.Agent.DisplayName;
         var target = $"{deviceName}/{agentEvent.Agent.Name ?? agentEvent.Agent.PaneId}";
         var text = TextChunker.Truncate(agentEvent.Text ?? "", MaxEventTextChars);
-        return agentEvent.Kind switch
+        var message = agentEvent.Kind switch
         {
             AgentEventKind.Completed => $"✅ [{deviceName}] {name} 做完了：\n\n{text}",
             AgentEventKind.Blocked => $"⚠️ [{deviceName}] {name} 在等你确认：\n\n{text}\n\n回复 /yes {target} 同意，/no {target} 拒绝",
             _ => $"❌ [{deviceName}] {name} 出错了：{text}",
         };
+        return agentEvent.Queued > 0 && agentEvent.Kind != AgentEventKind.Blocked
+            ? $"{message}\n\n📥 还有 {agentEvent.Queued} 条排队的指令，会接着发给它"
+            : message;
     }
 
     /// <summary>给人看的时长：不到 1 分钟、N 分钟、N 小时、N 天。</summary>

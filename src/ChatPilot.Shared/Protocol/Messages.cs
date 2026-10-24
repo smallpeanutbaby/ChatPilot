@@ -16,7 +16,19 @@ public abstract record WireMessage;
 /// <param name="NodeVersion">节点程序版本，例如 <c>0.1.0</c>。</param>
 /// <param name="Platform">操作系统描述，例如 <c>macOS 26.5.1 Arm64</c>。</param>
 /// <param name="HostName">电脑名。</param>
-public sealed record HelloMessage(int ProtocolVersion, string NodeVersion, string Platform, string HostName) : WireMessage;
+/// <param name="Networks">这台电脑的有线 / 无线网卡（<c>/wake</c> 唤醒它时用）；旧版节点不发，为 null。</param>
+public sealed record HelloMessage(
+    int ProtocolVersion,
+    string NodeVersion,
+    string Platform,
+    string HostName,
+    IReadOnlyList<NetworkInterfaceInfo>? Networks = null) : WireMessage;
+
+/// <summary>一块网卡：MAC 地址和它的 IPv4 网段。</summary>
+/// <param name="Mac">MAC 地址，格式 <c>AA:BB:CC:DD:EE:FF</c>，见 <see cref="Validation.IsMacAddress"/>。</param>
+/// <param name="Address">IPv4 地址；没有时为 null。</param>
+/// <param name="PrefixLength">子网前缀长度（0–32）。</param>
+public sealed record NetworkInterfaceInfo(string Mac, string? Address, int PrefixLength);
 
 /// <summary>服务器确认握手成功。</summary>
 /// <param name="DeviceId">设备 ID。</param>
@@ -50,15 +62,61 @@ public sealed record AgentEventMessage(AgentEvent Event) : WireMessage;
 [JsonDerivedType(typeof(RespondCommand), "respond")]
 [JsonDerivedType(typeof(RenameAgentCommand), "rename_agent")]
 [JsonDerivedType(typeof(LastReplyCommand), "last_reply")]
+[JsonDerivedType(typeof(MediaPromptCommand), "prompt_media")]
+[JsonDerivedType(typeof(DiffCommand), "diff")]
+[JsonDerivedType(typeof(StopAgentCommand), "stop_agent")]
+[JsonDerivedType(typeof(CloseAgentCommand), "close_agent")]
+[JsonDerivedType(typeof(WatchCommand), "watch")]
+[JsonDerivedType(typeof(WakeCommand), "wake")]
 public abstract record NodeCommand;
 
 /// <summary>列出节点上所有 agent。</summary>
 public sealed record ListAgentsCommand : NodeCommand;
 
-/// <summary>把文字交给 agent；节点提交后立即返回，做完后通过 <see cref="AgentEventMessage"/> 上报。</summary>
+/// <summary>
+/// 把文字交给 agent；节点提交后立即返回，做完后通过 <see cref="AgentEventMessage"/> 上报。
+/// agent 正在干活时节点先排队，等它做完再发。
+/// </summary>
 /// <param name="Target">pane ID 或 agent 名字。</param>
 /// <param name="Text">要交给 agent 的文字，不超过 <see cref="ProtocolInfo.MaxPromptChars"/> 个字符。</param>
 public sealed record PromptCommand(string Target, string Text) : NodeCommand;
+
+/// <summary>
+/// 带图片的 <see cref="PromptCommand"/>：节点先从服务器下载图片，把保存位置附在文字后面再交给 agent。
+/// 单独用一种指令而不是给 <see cref="PromptCommand"/> 加字段：旧节点会回"不支持"，而不是悄悄丢掉图片只发文字。
+/// </summary>
+/// <param name="Target">pane ID 或 agent 名字。</param>
+/// <param name="Text">要交给 agent 的文字。</param>
+/// <param name="Attachments">图片，1 到 <see cref="ProtocolInfo.MaxAttachments"/> 张。</param>
+public sealed record MediaPromptCommand(string Target, string Text, IReadOnlyList<MediaRef> Attachments) : NodeCommand;
+
+/// <summary>服务器上暂存的一张图片，节点凭设备令牌从 <see cref="ProtocolInfo.MediaPath"/> 下载。</summary>
+/// <param name="Id">下载 ID（随机生成，只给这条指令的目标设备用）。</param>
+/// <param name="Size">字节数，不超过 <see cref="ProtocolInfo.MaxImageBytes"/>。</param>
+/// <param name="Sha256">内容的 SHA-256（十六进制小写），节点下载后核对。</param>
+public sealed record MediaRef(string Id, long Size, string Sha256);
+
+/// <summary>看 agent 工作目录里的 git 改动（只读）。</summary>
+/// <param name="Target">pane ID 或 agent 名字。</param>
+/// <param name="Path">只看这个文件的 diff（相对仓库里 agent 的工作目录）；为 null 时看改动概要。</param>
+public sealed record DiffCommand(string Target, string? Path) : NodeCommand;
+
+/// <summary>打断 agent 正在干的活（按 Esc），并清空排队的指令。</summary>
+/// <param name="Target">pane ID 或 agent 名字。</param>
+public sealed record StopAgentCommand(string Target) : NodeCommand;
+
+/// <summary>关闭 agent 所在的 pane（结束 agent 进程）。服务器负责先让主人确认。</summary>
+/// <param name="Target">pane ID 或 agent 名字。</param>
+public sealed record CloseAgentCommand(string Target) : NodeCommand;
+
+/// <summary>开始或停止"盯着" agent：不是通过 ChatPilot 派的活，做完或卡在确认框时也通知。</summary>
+/// <param name="Target">pane ID 或 agent 名字；为 null 时表示这台电脑上的所有 agent。</param>
+/// <param name="Enable">true 开始盯，false 停止。</param>
+public sealed record WatchCommand(string? Target, bool Enable) : NodeCommand;
+
+/// <summary>在节点所在的局域网里广播 Wake-on-LAN 唤醒包。</summary>
+/// <param name="MacAddresses">要唤醒的网卡 MAC 地址，最多 <see cref="ProtocolInfo.MaxWakeAddresses"/> 个。</param>
+public sealed record WakeCommand(IReadOnlyList<string> MacAddresses) : NodeCommand;
 
 /// <summary>读 agent 最近的终端输出。</summary>
 /// <param name="Target">pane ID 或 agent 名字。</param>
@@ -121,7 +179,8 @@ public abstract record CommandData;
 
 /// <summary><see cref="ListAgentsCommand"/> 的结果。</summary>
 /// <param name="Agents">节点上的所有 agent。</param>
-public sealed record AgentListData(IReadOnlyList<AgentSummary> Agents) : CommandData;
+/// <param name="WatchAll">是否盯着这台电脑上的所有 agent（见 <see cref="WatchCommand"/>）。</param>
+public sealed record AgentListData(IReadOnlyList<AgentSummary> Agents, bool WatchAll = false) : CommandData;
 
 /// <summary>文本结果（例如 <see cref="ReadCommand"/> 读到的终端输出）。</summary>
 /// <param name="Text">文本内容。</param>
@@ -135,7 +194,14 @@ public sealed record AgentStartedData(AgentSummary Agent, bool Ready, string? Sc
 
 /// <summary>操作已完成的确认（例如"已发送"）。</summary>
 /// <param name="Message">给用户看的说明。</param>
-public sealed record AckData(string Message) : CommandData;
+public sealed record AckData(string Message) : CommandData
+{
+    /// <summary>
+    /// 指令已经交给 agent、没有别的要说明时的 <see cref="Message"/>。服务器看到它就用固定说法回复主人，
+    /// 看到别的（排队了、跟踪名额满了……）就把节点的说明转给主人。
+    /// </summary>
+    public const string Sent = "已发送";
+}
 
 /// <summary>一个 agent 的概要信息。</summary>
 /// <param name="PaneId">所在 pane，例如 <c>w1:p2</c>。</param>
@@ -145,6 +211,9 @@ public sealed record AckData(string Message) : CommandData;
 /// <param name="WorkspaceLabel">所在工作区的名字。</param>
 /// <param name="Cwd">当前工作目录。</param>
 /// <param name="Title">终端标题（Claude Code 会把当前任务写在这里）。</param>
+/// <param name="Watched">是否被盯着（见 <see cref="WatchCommand"/>）。</param>
+/// <param name="Queued">排队等着发给它的指令数。</param>
+/// <param name="TaskSince">通过 ChatPilot 交给它、还没做完的任务是什么时候开始的；没有时为 null。</param>
 public sealed record AgentSummary(
     string PaneId,
     string? Name,
@@ -152,7 +221,10 @@ public sealed record AgentSummary(
     string Status,
     string? WorkspaceLabel,
     string? Cwd,
-    string? Title)
+    string? Title,
+    bool Watched = false,
+    int Queued = 0,
+    DateTimeOffset? TaskSince = null)
 {
     /// <summary>给人看的名字：优先 agent 名字，其次工作区名，最后 pane ID。</summary>
     [JsonIgnore]
@@ -177,7 +249,16 @@ public enum AgentEventKind
 /// <param name="Kind">事件种类。</param>
 /// <param name="Agent">相关的 agent。</param>
 /// <param name="Text">回复内容、屏幕摘要或错误说明，含义见 <see cref="AgentEventKind"/>。</param>
-public sealed record AgentEvent(AgentEventKind Kind, AgentSummary Agent, string? Text);
+/// <param name="Prompt">这一轮交给它的文字（截短到 <see cref="ProtocolInfo.MaxEventPromptChars"/> 字）；不知道时为 null。</param>
+/// <param name="StartedAt">这一轮任务开始的时间；不知道时为 null。</param>
+/// <param name="Queued">还有几条排队的指令等着发给它。</param>
+public sealed record AgentEvent(
+    AgentEventKind Kind,
+    AgentSummary Agent,
+    string? Text,
+    string? Prompt = null,
+    DateTimeOffset? StartedAt = null,
+    int Queued = 0);
 
 /// <summary>节点用配对码换设备令牌（HTTP <c>POST /api/pair</c> 的请求体）。</summary>
 /// <param name="Code">配对码，例如 <c>ABCD-EFGH</c>（大小写、短横线都可以）。</param>

@@ -187,9 +187,20 @@ public static class NodeCli
         var events = new AgentEventQueue(loggerFactory.CreateLogger<AgentEventQueue>());
         var replies = new ReplyService(herdr, config, loggerFactory.CreateLogger<ReplyService>());
         var tasks = new TrackedTasks(TrackedTasks.PathFor(configPath), loggerFactory.CreateLogger<TrackedTasks>());
-        await using var tracker = new PromptTracker(herdr, replies, events, config, loggerFactory.CreateLogger<PromptTracker>(), tasks: tasks);
+        var queue = new PromptQueue(PromptQueue.PathFor(configPath), loggerFactory.CreateLogger<PromptQueue>());
+        await using var tracker = new PromptTracker(herdr, replies, events, config, loggerFactory.CreateLogger<PromptTracker>(), tasks: tasks, queue: queue);
         tracker.ResumeTrackedTasks();
-        var executor = new CommandExecutor(herdr, paths, tracker, replies, config, loggerFactory.CreateLogger<CommandExecutor>());
+        await using var watcher = new AgentWatcher(herdr, replies, events, tracker, AgentWatcher.PathFor(configPath), loggerFactory.CreateLogger<AgentWatcher>());
+        watcher.Start();
+        var git = new GitInspector(new ProcessRunner(), config.GitPath, TimeSpan.FromSeconds(config.CommandTimeoutSeconds));
+        using var mediaHttp = new HttpClient(PinnedTransport.CreateHttpHandler(config.NormalizedFingerprint)) { Timeout = TimeSpan.FromSeconds(config.CommandTimeoutSeconds) };
+        var attachments = new AttachmentDownloader(
+            mediaHttp,
+            new Uri(config.ServerUrl),
+            config.Token,
+            Path.Combine(Path.GetDirectoryName(Path.GetFullPath(configPath)) ?? ".", "attachments"));
+        var executor = new CommandExecutor(
+            herdr, paths, tracker, replies, config, loggerFactory.CreateLogger<CommandExecutor>(), watcher, git, attachments);
         var connection = new ServerConnection(
             ServerEndpoint.WebSocketUri(new Uri(config.ServerUrl)),
             config.Token,
@@ -248,6 +259,18 @@ public static class NodeCli
         }
 
         Console.WriteLine($"   默认类型：{config.DefaultAgentKind}");
+
+        try
+        {
+            var version = await new ProcessRunner().RunAsync(config.GitPath, ["--version"], TimeSpan.FromSeconds(10), CancellationToken.None).ConfigureAwait(false);
+            Console.WriteLine(version.ExitCode == 0
+                ? $"✅ {version.StandardOutput.Trim()}（/diff 可用）"
+                : $"⚠️ git 运行出错（{config.GitPath}），/diff 不可用");
+        }
+        catch (Exception ex) when (ex is ProcessStartException or TimeoutException)
+        {
+            Console.WriteLine($"⚠️ 找不到 git（{config.GitPath}），/diff 不可用；可以在配置的 gitPath 里写绝对路径");
+        }
 
         var server = new Uri(config.ServerUrl);
         using var handler = PinnedTransport.CreateHttpHandler(config.ServerFingerprint);

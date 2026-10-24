@@ -23,13 +23,14 @@ public interface IAgentEventSink
 /// <item>每个 agent 同时最多一个后台跟踪任务（按 pane ID 去重），总数不超过 <see cref="MaxWatchers"/>，防止后台 herdr 进程无限堆积。</item>
 /// <item>任务一旦停下就一定会上报一个事件：整理回复失败时也会上报，内容改为提示用 /read 查看。</item>
 /// <item>跟踪中的任务记在 <see cref="TrackedTasks"/> 里，结果发给服务器之后才删；节点重启后用 <see cref="ResumeTrackedTasks"/> 接着跟踪。</item>
+/// <item>agent 正在干活（或者已经有任务在跟踪）时发来的指令进 <see cref="PromptQueue"/> 排队，
+/// 由每个 pane 一个的后台泵在它空闲、没有别的跟踪时逐条发出，不会把文字敲进正在干活的终端。</item>
 /// </list>
 /// </remarks>
 public sealed class PromptTracker : IAsyncDisposable
 {
     /// <summary>同时跟踪的 agent 数上限。</summary>
     internal const int MaxWatchers = 32;
-
 
     /// <summary>初始说明最多发送几次。</summary>
     internal const int InitialPromptAttempts = 3;
@@ -42,6 +43,12 @@ public sealed class PromptTracker : IAsyncDisposable
 
     private static readonly TimeSpan ResumeRetryInterval = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(300);
+
+    /// <summary>排队泵每次用 <c>agent wait</c> 等它空闲最多等多久，到时再检查一遍队列（可能已被 /stop 清空）。</summary>
+    private static readonly TimeSpan QueueWaitSlice = TimeSpan.FromSeconds(30);
+
+    /// <summary>herdr 识别不出 pane 里的 agent 时，排队泵最多等多久再认定它已经不在了。</summary>
+    private static readonly TimeSpan KindlessGrace = TimeSpan.FromMinutes(1);
     private static readonly string[] SettledStates = [AgentStatus.Idle, AgentStatus.Done, AgentStatus.Blocked];
     private static readonly string[] ReadyStates = [AgentStatus.Idle, AgentStatus.Done];
 
@@ -57,6 +64,13 @@ public sealed class PromptTracker : IAsyncDisposable
     private readonly ConcurrentDictionary<string, string> _pendingInitialPrompts = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _lastPrompts = new(StringComparer.Ordinal);
     private readonly TrackedTasks _tasks;
+    private readonly PromptQueue _queue;
+
+    // 正在运行排队泵的 pane。
+    private readonly ConcurrentDictionary<string, byte> _pumping = new(StringComparer.Ordinal);
+
+    // 每个 pane 最近一次上报时的状态序号：盯梢（AgentWatcher）看到同一个状态就不再重复通知。
+    private readonly ConcurrentDictionary<string, long> _reportedSeq = new(StringComparer.Ordinal);
 
     // 结果已经上报、还没发到服务器的任务：跟踪结束时不能删它们的记录。
     private readonly ConcurrentDictionary<Guid, byte> _awaitingDelivery = new();
@@ -74,6 +88,7 @@ public sealed class PromptTracker : IAsyncDisposable
     /// </param>
     /// <param name="activityTimeout">提交后最多等多久看 agent 有没有开始干活（默认 10 秒）。</param>
     /// <param name="tasks">跟踪中的任务记录；不传时只记在内存里，重启后不接着跟踪。</param>
+    /// <param name="queue">排队的指令；不传时只记在内存里，重启后不接着发。</param>
     public PromptTracker(
         HerdrClient herdr,
         ReplyService replies,
@@ -82,7 +97,8 @@ public sealed class PromptTracker : IAsyncDisposable
         ILogger<PromptTracker> logger,
         TimeSpan? initialPromptGrace = null,
         TimeSpan? activityTimeout = null,
-        TrackedTasks? tasks = null)
+        TrackedTasks? tasks = null,
+        PromptQueue? queue = null)
     {
         _herdr = herdr;
         _replies = replies;
@@ -92,12 +108,14 @@ public sealed class PromptTracker : IAsyncDisposable
         _initialPromptGrace = initialPromptGrace ?? TimeSpan.FromSeconds(3);
         _activityTimeout = activityTimeout ?? TimeSpan.FromSeconds(10);
         _tasks = tasks ?? new TrackedTasks(null, logger);
+        _queue = queue ?? new PromptQueue(null, logger);
     }
 
     private TimeSpan WaitLimit => TimeSpan.FromHours(_config.PromptWaitHours);
 
     /// <summary>
-    /// 提交文字，然后在后台等结果。提交失败时直接返回失败结果；成功时返回"已发送"。
+    /// 交给 agent 一条指令。它正在干活、已经有任务在跟踪、或者前面还有排队的指令时，先排队，等轮到了再发；
+    /// 否则立即提交，然后在后台等结果。提交失败时直接返回失败结果。
     /// </summary>
     /// <param name="agent">提交前的 agent 状态，用它的状态序号判断之后有没有开始干活。</param>
     /// <param name="text">要交给 agent 的文字。</param>
@@ -105,6 +123,50 @@ public sealed class PromptTracker : IAsyncDisposable
     public async Task<CommandOutcome> SubmitAsync(HerdrAgent agent, string text, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(agent);
+        if (agent.Status == AgentStatus.Working || _watched.ContainsKey(agent.PaneId) || _queue.Count(agent.PaneId) > 0)
+        {
+            if (_queue.Enqueue(agent, text, DateTimeOffset.UtcNow) is not { } position)
+            {
+                return CommandOutcome.Failure(ErrorCodes.Busy, $"排队的指令太多了（每个 agent 最多 {PromptQueue.MaxPerAgent} 条），等它做完一些再发，或者用 /stop 清空");
+            }
+
+            EnsurePump(agent.PaneId);
+            return CommandOutcome.Success(new AckData($"它正在忙，已排队（第 {position} 条），轮到时自动发出"));
+        }
+
+        return await SubmitNowAsync(agent, text, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>排队等着发给这个 pane 的指令数。</summary>
+    public int QueuedCount(string paneId) => _queue.Count(paneId);
+
+    /// <summary>这个 pane 上通过 ChatPilot 交给它、还没做完的任务是什么时候开始的。</summary>
+    public DateTimeOffset? TaskSince(string paneId) => _tasks.Find(paneId)?.Since;
+
+    /// <summary>这个 pane 是否正被后台跟踪（做完会由跟踪方上报）。</summary>
+    internal bool IsTracking(string paneId) => _watched.ContainsKey(paneId);
+
+    /// <summary>这个 pane 最近一次上报结果时的状态序号；没上报过为 null。</summary>
+    internal long? LastReportedSeq(string paneId) => _reportedSeq.TryGetValue(paneId, out var seq) ? seq : null;
+
+    /// <summary>清空这个 pane 排队的指令，返回清掉了几条。</summary>
+    public int ClearQueue(string paneId) => _queue.Clear(paneId);
+
+    /// <summary>pane 被关闭了：丢掉排队的指令和任务记录（正在跟踪的后台任务会因为找不到 agent 自己结束）。</summary>
+    public void Forget(string paneId)
+    {
+        _queue.Clear(paneId);
+        if (_tasks.Find(paneId) is { } task)
+        {
+            _tasks.Remove(task.Id);
+        }
+
+        _lastPrompts.TryRemove(paneId, out _);
+    }
+
+    /// <summary>立即提交文字，然后在后台等结果。</summary>
+    private async Task<CommandOutcome> SubmitNowAsync(HerdrAgent agent, string text, CancellationToken cancellationToken)
+    {
         try
         {
             await _herdr.PromptAsync(agent.PaneId, text, cancellationToken).ConfigureAwait(false);
@@ -129,7 +191,7 @@ public sealed class PromptTracker : IAsyncDisposable
 
         return CommandOutcome.Success(new AckData(watching switch
         {
-            WatchResult.Started or WatchResult.AlreadyWatching => "已发送",
+            WatchResult.Started or WatchResult.AlreadyWatching => AckData.Sent,
             _ => $"已发送（同时跟踪的任务已满 {MaxWatchers} 个，这次做完不会通知，可以用 /read 查看）",
         }));
     }
@@ -193,6 +255,11 @@ public sealed class PromptTracker : IAsyncDisposable
         foreach (var task in _tasks.Snapshot())
         {
             Track(() => ResumeAsync(task, _stopping.Token));
+        }
+
+        foreach (var paneId in _queue.Panes())
+        {
+            EnsurePump(paneId);
         }
     }
 
@@ -562,10 +629,21 @@ public sealed class PromptTracker : IAsyncDisposable
     }
 
     /// <summary>上报事件。这个 agent 的任务记录等事件确实发到服务器之后再删，发出之前节点退出的话，重启后会再查一次。</summary>
-    private void Publish(AgentEventKind kind, HerdrAgent agent, string? text)
+    /// <param name="kind">事件种类。</param>
+    /// <param name="agent">相关的 agent。</param>
+    /// <param name="text">事件文字。</param>
+    /// <param name="queued">事件是关于这条排队的指令的（没发出去）：不关联、也不删除这个 pane 正在跟踪的任务。</param>
+    private void Publish(AgentEventKind kind, HerdrAgent agent, string? text, QueuedPrompt? queued = null)
     {
+        if (queued is not null)
+        {
+            _sink.Publish(new AgentEvent(kind, agent.ToSummary(workspaceLabel: null), text, Summarize(queued.Text), queued.EnqueuedAt, _queue.Count(agent.PaneId)));
+            return;
+        }
+
         Action? delivered = null;
-        if (_tasks.Find(agent.PaneId) is { } task)
+        var task = _tasks.Find(agent.PaneId);
+        if (task is not null)
         {
             _awaitingDelivery[task.Id] = 0;
             delivered = () =>
@@ -575,8 +653,172 @@ public sealed class PromptTracker : IAsyncDisposable
             };
         }
 
-        _sink.Publish(new AgentEvent(kind, agent.ToSummary(workspaceLabel: null), text), delivered);
+        _reportedSeq[agent.PaneId] = agent.StateChangeSeq;
+        var agentEvent = new AgentEvent(
+            kind,
+            agent.ToSummary(workspaceLabel: null),
+            text,
+            Summarize(task?.Prompt),
+            task?.Since,
+            _queue.Count(agent.PaneId));
+        _sink.Publish(agentEvent, delivered);
     }
+
+    /// <summary>事件里附带的任务摘要：第一行，截短到 <see cref="ProtocolInfo.MaxEventPromptChars"/> 字。</summary>
+    internal static string? Summarize(string? prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt))
+        {
+            return null;
+        }
+
+        var line = prompt.Trim().Split('\n', 2)[0].Trim();
+        return Shared.Text.TextChunker.Truncate(line, ProtocolInfo.MaxEventPromptChars);
+    }
+
+    /// <summary>这个 pane 还没有排队泵的话启动一个。泵在队列空了之后退出。</summary>
+    private void EnsurePump(string paneId)
+    {
+        if (_stopping.IsCancellationRequested || !_pumping.TryAdd(paneId, 0))
+        {
+            return;
+        }
+
+        Track(async () =>
+        {
+            try
+            {
+                await PumpQueueAsync(paneId, _stopping.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                _pumping.TryRemove(paneId, out _);
+
+                // 泵决定退出和移除登记之间新排进来的指令，不能没人管。
+                if (!_stopping.IsCancellationRequested && _queue.Count(paneId) > 0)
+                {
+                    EnsurePump(paneId);
+                }
+            }
+        });
+    }
+
+    /// <summary>
+    /// 逐条发出排队的指令：等 agent 空闲、并且没有别的后台跟踪（上一条的结果已经上报）时，过一会儿再确认一次，然后提交下一条。
+    /// 排队时的那个 agent 不见了（或者换成了别的终端、别的类型），丢掉给它排的指令并通知，给现在这个 agent 排的照常发；
+    /// herdr 暂时识别不出 agent 时先等一会儿，不急着丢。排太久的丢掉并通知。
+    /// </summary>
+    private async Task PumpQueueAsync(string paneId, CancellationToken cancellationToken)
+    {
+        DateTimeOffset? kindlessSince = null;
+        while (_queue.Peek(paneId) is { } next)
+        {
+            if (DateTimeOffset.UtcNow - next.EnqueuedAt > WaitLimit)
+            {
+                if (_queue.Remove(next.Id))
+                {
+                    Publish(AgentEventKind.Failed, Placeholder(next), $"排队等了 {_config.PromptWaitHours} 小时还没轮到，这条没有发出：{Summarize(next.Text)}", next);
+                }
+
+                continue;
+            }
+
+            if (_watched.ContainsKey(paneId))
+            {
+                // 上一条还在跟踪，做完会上报；等它结束。
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            HerdrAgent? agent;
+            try
+            {
+                agent = await _herdr.TryGetAgentAsync(paneId, cancellationToken).ConfigureAwait(false);
+                if (agent is not null && SameAgent(next, agent) && !agent.IsReady)
+                {
+                    // 在干活（不是通过 ChatPilot 派的）或者在等确认：用 agent wait 等它空闲，不用频繁轮询。
+                    await _herdr.WaitAsync(paneId, ReadyStates, QueueWaitSlice, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+            }
+            catch (HerdrException ex)
+            {
+                if (ex.Code != "timeout")
+                {
+                    _logger.LogDebug("排队泵查询 {Pane} 时 herdr 出错（{Message}），稍后重试", paneId, ex.Message);
+                    await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
+                }
+
+                continue;
+            }
+
+            if (agent is { Kind: null } && (next.TerminalId is null || agent.TerminalId == next.TerminalId))
+            {
+                kindlessSince ??= DateTimeOffset.UtcNow;
+                if (DateTimeOffset.UtcNow - kindlessSince < KindlessGrace)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+            }
+            else
+            {
+                kindlessSince = null;
+            }
+
+            if (agent is null || !SameAgent(next, agent))
+            {
+                var stale = _queue.RemoveWhere(paneId, queued => agent is null || !SameAgent(queued, agent));
+                if (stale.Count > 0)
+                {
+                    Publish(AgentEventKind.Failed, Placeholder(stale[0]), $"它已经不在了，排队的 {stale.Count} 条指令没有发出", stale[0]);
+                }
+
+                continue;
+            }
+
+            // 刚空闲时界面可能还没准备好（会吞输入）；等一会儿再确认一次，期间可能又有人给它派了活。
+            await Task.Delay(_initialPromptGrace, cancellationToken).ConfigureAwait(false);
+            if (_watched.ContainsKey(paneId))
+            {
+                continue;
+            }
+
+            HerdrAgent? latest;
+            try
+            {
+                latest = await _herdr.TryGetAgentAsync(paneId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (HerdrException)
+            {
+                continue;
+            }
+
+            if (latest is not { IsReady: true } || !_queue.Remove(next.Id))
+            {
+                continue;
+            }
+
+            var outcome = await SubmitNowAsync(latest, next.Text, cancellationToken).ConfigureAwait(false);
+            if (!outcome.Ok)
+            {
+                Publish(AgentEventKind.Failed, latest, $"排队的指令没有发出（{outcome.Error?.Message}）：{Summarize(next.Text)}", next);
+            }
+            else if (!_watched.ContainsKey(paneId))
+            {
+                // 同时跟踪的任务满了，这一条没人跟踪：至少等它开始干活再看下一条，不能把两条连着敲进去。
+                await WaitForActivityAsync(latest, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>还是排队时的那个 agent：同一类、同一个终端。</summary>
+    private static bool SameAgent(QueuedPrompt queued, HerdrAgent agent) =>
+        agent.Kind == queued.Kind && (queued.TerminalId is null || agent.TerminalId == queued.TerminalId);
+
+    /// <summary>agent 已经不在时，用排队记录拼一个，只用于通知里显示名字。</summary>
+    private static HerdrAgent Placeholder(QueuedPrompt queued) =>
+        new(queued.PaneId, queued.Name, queued.Kind, AgentStatus.Unknown, null, null, null, null, 0, queued.TerminalId);
 
     /// <summary>登记并运行后台任务；退出时等它们结束（最多 5 秒）。</summary>
     private void Track(Func<Task> work)

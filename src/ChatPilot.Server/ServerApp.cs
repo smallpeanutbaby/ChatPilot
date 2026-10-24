@@ -8,9 +8,11 @@ using ChatPilot.Server.Devices;
 using ChatPilot.Server.Options;
 using ChatPilot.Server.Security;
 using ChatPilot.Server.State;
+using ChatPilot.Server.Telegram;
 using ChatPilot.Server.WeChat;
 using ChatPilot.Shared;
 using ChatPilot.Shared.Protocol;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Options;
 
@@ -116,15 +118,29 @@ public static class ServerApp
         services.AddSingleton<ChatChannelRegistry>();
         services.AddSingleton<Notifier>();
         services.AddSingleton<PresenceNotifier>();
+        services.AddSingleton<ConversationState>();
+        services.AddSingleton(sp => new TaskHistory(
+            sp.GetRequiredService<IOptions<ServerOptions>>().Value.ResolvedDataDir,
+            sp.GetRequiredService<ILogger<TaskHistory>>()));
+        services.AddSingleton<MediaStore>();
+        services.AddSingleton<UserClock>();
         services.AddSingleton<DeviceHub>();
         services.AddSingleton<ChatDispatcher>();
         services.AddSingleton<DevChannel>();
+        services.AddHostedService<Scheduler>();
         services.AddSingleton(sp => new ILinkClient(
             new HttpClient(new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5) }) { Timeout = Timeout.InfiniteTimeSpan },
             sp.GetRequiredService<IOptions<ServerOptions>>()));
         services.AddSingleton<WeChatLogin>();
         services.AddSingleton<WeChatChannel>();
         services.AddHostedService(sp => sp.GetRequiredService<WeChatChannel>());
+        services.AddSingleton(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<ServerOptions>>();
+            return new TelegramClient(TelegramClient.CreateHttpClient(options.Value.Telegram), options);
+        });
+        services.AddSingleton<TelegramChannel>();
+        services.AddHostedService(sp => sp.GetRequiredService<TelegramChannel>());
 
         services.ConfigureHttpJsonOptions(json =>
         {
@@ -168,6 +184,7 @@ public static class ServerApp
         app.MapGet(ProtocolInfo.HealthPath, () => Results.Text("ok"));
         app.MapPost(ProtocolInfo.PairPath, Pair).RequireRateLimiting("pair");
         app.Map(ProtocolInfo.NodeWebSocketPath, AcceptNodeAsync).RequireRateLimiting("ws");
+        app.MapGet(ProtocolInfo.MediaPath + "{id}", FetchMedia).RequireRateLimiting("ws");
 
         var options = app.Services.GetRequiredService<IOptions<ServerOptions>>().Value;
 
@@ -177,10 +194,16 @@ public static class ServerApp
             app.Services.GetRequiredService<ChatChannelRegistry>().Register(app.Services.GetRequiredService<WeChatChannel>());
         }
 
+        if (options.Telegram.Enabled)
+        {
+            app.Services.GetRequiredService<ChatChannelRegistry>().Register(app.Services.GetRequiredService<TelegramChannel>());
+        }
+
         if (options.DevChannel.Enabled)
         {
             app.Services.GetRequiredService<ChatChannelRegistry>().Register(app.Services.GetRequiredService<DevChannel>());
             app.MapPost("/dev/chat", DevChatAsync).RequireRateLimiting("dev");
+            app.MapPost("/dev/image", DevImageAsync).RequireRateLimiting("dev");
             app.MapGet("/dev/events", DevEvents).RequireRateLimiting("dev");
         }
 
@@ -263,6 +286,54 @@ public static class ServerApp
     private static IResult DevEvents(HttpContext context, DevChannel channel) =>
         channel.Authorize(context) ?? Results.Ok(new DevEventsResponse(channel.Drain()));
 
+    /// <summary>测试通道模拟主人发图片：请求体就是图片的原始字节。先验令牌再读请求体。</summary>
+    private static async Task<IResult> DevImageAsync(HttpContext context, DevChannel channel, ChatDispatcher dispatcher)
+    {
+        if (channel.Authorize(context) is { } denied)
+        {
+            return denied;
+        }
+
+        if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } limit)
+        {
+            limit.MaxRequestBodySize = ProtocolInfo.MaxImageBytes;
+        }
+
+        using var buffer = new MemoryStream();
+        await context.Request.Body.CopyToAsync(buffer, context.RequestAborted).ConfigureAwait(false);
+        if (buffer.Length is 0 or > ProtocolInfo.MaxImageBytes)
+        {
+            return Results.BadRequest(new ErrorResponse("图片不能为空，也不能太大"));
+        }
+
+        var reply = await dispatcher.HandleImageAsync(buffer.ToArray(), context.RequestAborted).ConfigureAwait(false);
+        return Results.Ok(new DevChatResponse(channel.Chunk(reply)));
+    }
+
+    /// <summary>
+    /// 节点下载随指令发来的图片：要带设备令牌，并且只能取发给自己这台设备的。令牌错误和 WebSocket 一样按 IP 限流。
+    /// </summary>
+    private static IResult FetchMedia(string id, HttpContext context, StateStore store, MediaStore media, AuthFailureLimiter failures)
+    {
+        var source = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        if (failures.IsBlocked(source))
+        {
+            return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+        }
+
+        var header = context.Request.Headers.Authorization.ToString();
+        var token = header.StartsWith("Bearer ", StringComparison.Ordinal) ? header["Bearer ".Length..].Trim() : null;
+        if (store.FindDeviceByToken(token) is not { } device)
+        {
+            failures.RecordFailure(source);
+            return Results.Unauthorized();
+        }
+
+        return id.Length is > 0 and <= 64 && id.All(char.IsAsciiHexDigitLower) && media.Fetch(id, device.Id) is { } data
+            ? Results.Bytes(data, "application/octet-stream")
+            : Results.NotFound();
+    }
+
     private static RateLimitPartition<string> PerIp(HttpContext context, int permits) =>
         RateLimitPartition.GetFixedWindowLimiter(
             context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
@@ -282,6 +353,11 @@ public static class ServerApp
         if (options.DevChannel.Enabled)
         {
             logger.LogWarning("测试通道已开启（只接受本机请求）");
+        }
+
+        if (options.TimeZoneWarning() is { } timeZoneWarning)
+        {
+            logger.LogWarning("{Warning}", timeZoneWarning);
         }
 
         if (app.Services.GetRequiredService<StateStore>().Devices().Count == 0)

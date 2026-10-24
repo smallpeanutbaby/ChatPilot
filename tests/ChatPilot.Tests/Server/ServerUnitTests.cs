@@ -98,8 +98,9 @@ public class ChatCommandParserTests
         Assert.Equal("win", Assert.IsType<ChatUnpair>(ChatCommandParser.Parse("/unpair win")).Device);
         Assert.Equal("win", Assert.IsType<ChatUse>(ChatCommandParser.Parse("/use win")).Device);
         Assert.IsType<ChatInvalid>(ChatCommandParser.Parse("/use"));
-        Assert.Equal("mac", Assert.IsType<ChatLast>(ChatCommandParser.Parse("/last mac/tideq")).Target.Device);
-        Assert.IsType<ChatInvalid>(ChatCommandParser.Parse("/last"));
+        Assert.Equal("mac", Assert.IsType<ChatLast>(ChatCommandParser.Parse("/last mac/tideq")).Target?.Device);
+        Assert.Null(Assert.IsType<ChatLast>(ChatCommandParser.Parse("/last")).Target);
+        Assert.IsType<ChatInvalid>(ChatCommandParser.Parse("/last a b"));
         Assert.IsType<ChatInvalid>(ChatCommandParser.Parse("/frobnicate"));
         Assert.IsType<ChatInvalid>(ChatCommandParser.Parse("   "));
     }

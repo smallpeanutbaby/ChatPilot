@@ -1,4 +1,5 @@
 using ChatPilot.Node.Config;
+using ChatPilot.Node.Connection;
 using ChatPilot.Node.Herdr;
 using ChatPilot.Shared;
 using ChatPilot.Shared.Protocol;
@@ -9,15 +10,29 @@ namespace ChatPilot.Node.Execution;
 
 /// <summary>
 /// 执行服务器发来的指令。这是节点的安全边界：每个参数都要先校验，
-/// 只能做协议里定义的几种 herdr 操作，不能执行任意命令。
+/// 只能做协议里定义的几种 herdr 操作（外加只读的 git 查询和局域网唤醒包），不能执行任意命令。
 /// </summary>
+/// <param name="herdr">herdr 客户端。</param>
+/// <param name="paths">/new 的目录白名单。</param>
+/// <param name="tracker">任务跟踪和排队。</param>
+/// <param name="replies">取回复和屏幕摘要。</param>
+/// <param name="config">节点配置。</param>
+/// <param name="logger">日志。</param>
+/// <param name="watcher">盯梢；为 null 时不支持 /watch。</param>
+/// <param name="git">git 查询；为 null 时不支持 /diff。</param>
+/// <param name="attachments">图片下载；为 null 时不支持带图片的指令。</param>
+/// <param name="wakeSender">广播唤醒包，返回发出的包数；为 null 时用 <see cref="LocalNetwork.SendWakeAsync"/>（测试时替换掉，不真的发包）。</param>
 public sealed class CommandExecutor(
     HerdrClient herdr,
     PathPolicy paths,
     PromptTracker tracker,
     ReplyService replies,
     NodeConfig config,
-    ILogger<CommandExecutor> logger)
+    ILogger<CommandExecutor> logger,
+    AgentWatcher? watcher = null,
+    GitInspector? git = null,
+    AttachmentDownloader? attachments = null,
+    Func<IReadOnlyList<string>, CancellationToken, Task<int>>? wakeSender = null)
 {
     private const int MaxReadChars = 12000;
     private const int ReadOverscanLines = 80;
@@ -42,13 +57,19 @@ public sealed class CommandExecutor(
             return command switch
             {
                 ListAgentsCommand => await ListAsync(token).ConfigureAwait(false),
-                PromptCommand prompt => await PromptAsync(prompt, token).ConfigureAwait(false),
+                PromptCommand prompt => await PromptAsync(prompt.Target, prompt.Text, null, token).ConfigureAwait(false),
+                MediaPromptCommand prompt => await PromptAsync(prompt.Target, prompt.Text, prompt.Attachments ?? [], token).ConfigureAwait(false),
                 ReadCommand read => await ReadAsync(read, token).ConfigureAwait(false),
                 StartAgentCommand start => await StartAgentAsync(start, token).ConfigureAwait(false),
                 SendKeysCommand keys => await SendKeysAsync(keys, token).ConfigureAwait(false),
                 RespondCommand respond => await RespondAsync(respond, token).ConfigureAwait(false),
                 RenameAgentCommand rename => await RenameAsync(rename, token).ConfigureAwait(false),
                 LastReplyCommand last => await LastReplyAsync(last, token).ConfigureAwait(false),
+                DiffCommand diff => await DiffAsync(diff, token).ConfigureAwait(false),
+                StopAgentCommand stop => await StopAsync(stop, token).ConfigureAwait(false),
+                CloseAgentCommand close => await CloseAsync(close, token).ConfigureAwait(false),
+                WatchCommand watch => await WatchAsync(watch, token).ConfigureAwait(false),
+                WakeCommand wake => await WakeAsync(wake, token).ConfigureAwait(false),
                 _ => CommandOutcome.Failure(ErrorCodes.InvalidArgument, "不支持的指令"),
             };
         }
@@ -91,27 +112,43 @@ public sealed class CommandExecutor(
     {
         var agents = await herdr.ListAgentsAsync(cancellationToken).ConfigureAwait(false);
         var labels = await WorkspaceLabelsAsync(cancellationToken).ConfigureAwait(false);
-        return CommandOutcome.Success(new AgentListData(agents.Select(a => a.ToSummary(LabelOf(labels, a))).ToList()));
+        var summaries = agents
+            .Select(a => a.ToSummary(LabelOf(labels, a)) with
+            {
+                Watched = watcher?.IsWatched(a) ?? false,
+                Queued = tracker.QueuedCount(a.PaneId),
+                TaskSince = tracker.TaskSince(a.PaneId),
+            })
+            .ToList();
+        return CommandOutcome.Success(new AgentListData(summaries, watcher?.WatchAll ?? false));
     }
 
-    private async Task<CommandOutcome> PromptAsync(PromptCommand command, CancellationToken cancellationToken)
+    /// <summary>派活（可以带图片）。图片先下载保存，路径附在文字后面；指令没交出去（比如排队满了）就把刚保存的图片删掉。</summary>
+    private async Task<CommandOutcome> PromptAsync(string target, string text, IReadOnlyList<MediaRef>? media, CancellationToken cancellationToken)
     {
-        if (InvalidTarget(command.Target) is { } invalid)
+        if (InvalidTarget(target) is { } invalid)
         {
             return invalid;
         }
 
-        if (string.IsNullOrWhiteSpace(command.Text))
+        if (string.IsNullOrWhiteSpace(text))
         {
             return CommandOutcome.Failure(ErrorCodes.InvalidArgument, "内容不能为空");
         }
 
-        if (command.Text.Length > ProtocolInfo.MaxPromptChars)
+        if (text.Length > ProtocolInfo.MaxPromptChars)
         {
             return CommandOutcome.Failure(ErrorCodes.InvalidArgument, $"内容太长（上限 {ProtocolInfo.MaxPromptChars} 字）");
         }
 
-        var agent = await herdr.GetAgentAsync(command.Target, cancellationToken).ConfigureAwait(false);
+        if (media is not null && (media.Count is 0 or > ProtocolInfo.MaxAttachments || attachments is null))
+        {
+            return CommandOutcome.Failure(ErrorCodes.InvalidArgument, attachments is null
+                ? "这个节点不支持图片"
+                : $"一次带 1–{ProtocolInfo.MaxAttachments} 张图片");
+        }
+
+        var agent = await herdr.GetAgentAsync(target, cancellationToken).ConfigureAwait(false);
         if (agent.Kind is null)
         {
             return CommandOutcome.Failure(ErrorCodes.NotFound, "这个 pane 里没有识别出 agent");
@@ -123,7 +160,140 @@ public sealed class CommandExecutor(
             return CommandOutcome.Failure(ErrorCodes.AgentBlocked, "它正在等你确认，先回复 /yes 或 /no：\n\n" + screen);
         }
 
-        return await tracker.SubmitAsync(agent, command.Text, cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<string> saved = [];
+        if (media is not null && attachments is not null)
+        {
+            try
+            {
+                saved = await attachments.SaveAsync(media, agent.Cwd, cancellationToken).ConfigureAwait(false);
+                text = AttachmentDownloader.AppendToPrompt(text, saved);
+            }
+            catch (AttachmentException ex)
+            {
+                return CommandOutcome.Failure(ErrorCodes.InvalidArgument, ex.Message);
+            }
+        }
+
+        var outcome = await tracker.SubmitAsync(agent, text, cancellationToken).ConfigureAwait(false);
+        if (!outcome.Ok)
+        {
+            AttachmentDownloader.DeleteQuietly(saved);
+        }
+
+        return outcome;
+    }
+
+    /// <summary><c>/diff</c>：agent 工作目录里的 git 改动概要，或者一个文件的 diff。只读。</summary>
+    private async Task<CommandOutcome> DiffAsync(DiffCommand command, CancellationToken cancellationToken)
+    {
+        if (InvalidTarget(command.Target) is { } invalid)
+        {
+            return invalid;
+        }
+
+        if (command.Path is not null && !Validation.IsRepoRelativePath(command.Path))
+        {
+            return CommandOutcome.Failure(ErrorCodes.InvalidArgument, "文件路径要写相对 agent 工作目录的路径，例如 src/app.ts，不能有 ..");
+        }
+
+        if (git is null)
+        {
+            return CommandOutcome.Failure(ErrorCodes.InvalidArgument, "这个节点不支持 /diff");
+        }
+
+        var agent = await herdr.GetAgentAsync(command.Target, cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(agent.Cwd))
+        {
+            return CommandOutcome.Failure(ErrorCodes.NotFound, "不知道它的工作目录");
+        }
+
+        try
+        {
+            var text = command.Path is null
+                ? await git.SummaryAsync(agent.Cwd, cancellationToken).ConfigureAwait(false)
+                : await git.FileDiffAsync(agent.Cwd, command.Path, cancellationToken).ConfigureAwait(false);
+            return CommandOutcome.Success(new TextData(text));
+        }
+        catch (GitException ex)
+        {
+            return CommandOutcome.Failure(ErrorCodes.NotFound, ex.Message);
+        }
+    }
+
+    /// <summary><c>/stop</c>：清空排队的指令；agent 正在干活时按 Esc 打断。在等确认或空闲时不按键。</summary>
+    private async Task<CommandOutcome> StopAsync(StopAgentCommand command, CancellationToken cancellationToken)
+    {
+        if (InvalidTarget(command.Target) is { } invalid)
+        {
+            return invalid;
+        }
+
+        var agent = await herdr.GetAgentAsync(command.Target, cancellationToken).ConfigureAwait(false);
+        var cleared = tracker.ClearQueue(agent.PaneId);
+        var note = cleared > 0 ? $"，清空了 {cleared} 条排队的指令" : "";
+        if (agent.Status == AgentStatus.Working)
+        {
+            await herdr.SendKeysAsync(agent.PaneId, ["esc"], cancellationToken).ConfigureAwait(false);
+            return CommandOutcome.Success(new AckData("已按 Esc 打断它" + note));
+        }
+
+        return CommandOutcome.Success(new AckData(agent.Status == AgentStatus.Blocked
+            ? $"它在等你确认，没有按键（要拒绝用 /no）{note}"
+            : $"它现在没在干活，没有按键{note}"));
+    }
+
+    /// <summary><c>/close</c>：关闭 agent 所在的 pane，丢掉它排队的指令和任务记录。</summary>
+    private async Task<CommandOutcome> CloseAsync(CloseAgentCommand command, CancellationToken cancellationToken)
+    {
+        if (InvalidTarget(command.Target) is { } invalid)
+        {
+            return invalid;
+        }
+
+        var agent = await herdr.GetAgentAsync(command.Target, cancellationToken).ConfigureAwait(false);
+        await herdr.ClosePaneAsync(agent.PaneId, cancellationToken).ConfigureAwait(false);
+        tracker.Forget(agent.PaneId);
+        logger.LogInformation("按主人的要求关闭了 {Agent}（{Pane}）", agent.Name ?? agent.PaneId, agent.PaneId);
+        return CommandOutcome.Success(new AckData($"已关闭（{agent.PaneId}）"));
+    }
+
+    /// <summary><c>/watch</c>、<c>/unwatch</c>：开始或停止盯一个 agent；没有目标时是这台电脑上的所有 agent。</summary>
+    private async Task<CommandOutcome> WatchAsync(WatchCommand command, CancellationToken cancellationToken)
+    {
+        if (watcher is null)
+        {
+            return CommandOutcome.Failure(ErrorCodes.InvalidArgument, "这个节点不支持 /watch");
+        }
+
+        if (command.Target is null)
+        {
+            return CommandOutcome.Success(new AckData(watcher.SetAll(command.Enable)));
+        }
+
+        if (InvalidTarget(command.Target) is { } invalid)
+        {
+            return invalid;
+        }
+
+        var agent = await herdr.GetAgentAsync(command.Target, cancellationToken).ConfigureAwait(false);
+        return agent.Kind is null
+            ? CommandOutcome.Failure(ErrorCodes.NotFound, "这个 pane 里没有识别出 agent")
+            : CommandOutcome.Success(new AckData(watcher.Set(agent, command.Enable)));
+    }
+
+    /// <summary><c>/wake</c>：在这台电脑所在的局域网里广播唤醒包。</summary>
+    private async Task<CommandOutcome> WakeAsync(WakeCommand command, CancellationToken cancellationToken)
+    {
+        if (command.MacAddresses is null || command.MacAddresses.Count is 0 or > ProtocolInfo.MaxWakeAddresses
+            || !command.MacAddresses.All(Validation.IsMacAddress))
+        {
+            return CommandOutcome.Failure(ErrorCodes.InvalidArgument, "MAC 地址不合法");
+        }
+
+        var sent = await (wakeSender ?? LocalNetwork.SendWakeAsync)(command.MacAddresses, cancellationToken).ConfigureAwait(false);
+        return sent > 0
+            ? CommandOutcome.Success(new AckData($"已广播唤醒包（{sent} 个）"))
+            : CommandOutcome.Failure(ErrorCodes.Internal, "唤醒包没有发出去（没有可用的网卡）");
     }
 
     private async Task<CommandOutcome> ReadAsync(ReadCommand command, CancellationToken cancellationToken)

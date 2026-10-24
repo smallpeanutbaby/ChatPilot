@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using ChatPilot.Shared.Protocol;
 using ChatPilot.Shared.Security;
 
 namespace ChatPilot.Server.State;
@@ -16,7 +17,23 @@ public sealed class ServerState
 
     /// <summary>当前默认设备（<c>/use</c>）。</summary>
     public string? SelectedDeviceId { get; set; }
+
+    /// <summary>还没执行的定时任务（<c>/at</c>）。</summary>
+    public List<ScheduledJob> ScheduledJobs { get; set; } = [];
+
+    /// <summary>下一个定时任务的编号。</summary>
+    public int NextJobId { get; set; } = 1;
+
+    /// <summary>Telegram 长轮询的 offset（下一个要取的 update_id），重启后从这里继续，不重复执行指令。</summary>
+    public long? TelegramOffset { get; set; }
 }
+
+/// <summary>一个定时任务：到点后像主人刚发了这条消息一样执行。</summary>
+/// <param name="Id">编号，<c>/at del 编号</c> 取消时用。</param>
+/// <param name="DueAt">执行时间（UTC）。</param>
+/// <param name="Text">到点要执行的消息（<c>@设备/目标 内容</c> 或交给管家的文字）。</param>
+/// <param name="CreatedAt">创建时间。</param>
+public sealed record ScheduledJob(int Id, DateTimeOffset DueAt, string Text, DateTimeOffset CreatedAt);
 
 /// <summary>微信绑定信息。<see cref="OwnerUserId"/> 是扫码的微信号，也是唯一能下指令的人。</summary>
 public sealed class WeChatAccount
@@ -66,6 +83,9 @@ public sealed record DeviceRecord
 
     /// <summary>已经通知过主人"这台设备离线了"、还没通知"恢复"。</summary>
     public bool OfflineNotified { get; init; }
+
+    /// <summary>最近一次上线时节点报告的网卡（<c>/wake</c> 唤醒它时用）；旧版节点不报告，为 null。</summary>
+    public IReadOnlyList<NetworkInterfaceInfo>? Networks { get; init; }
 }
 
 /// <summary>

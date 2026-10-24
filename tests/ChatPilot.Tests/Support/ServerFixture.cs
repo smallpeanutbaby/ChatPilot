@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.WebSockets;
@@ -132,12 +133,15 @@ internal sealed class NodeHarness : IAsyncDisposable
     private readonly TaskCompletionSource<WelcomeMessage> _welcome = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _disposed;
 
-    private NodeHarness(FakeHerdr herdr, NodeConfig config, ServerConnection connection, PromptTracker tracker, TempDirectory root)
+    private NodeHarness(
+        FakeHerdr herdr, NodeConfig config, ServerConnection connection, PromptTracker tracker, AgentWatcher watcher, ConcurrentQueue<string> woken, TempDirectory root)
     {
         Herdr = herdr;
         Config = config;
         Connection = connection;
         _tracker = tracker;
+        Watcher = watcher;
+        Woken = woken;
         Root = root;
         connection.Connected += welcome => _welcome.TrySetResult(welcome);
         RunTask = connection.RunAsync(_stop.Token);
@@ -150,6 +154,11 @@ internal sealed class NodeHarness : IAsyncDisposable
     public ServerConnection Connection { get; }
 
     public TempDirectory Root { get; }
+
+    public AgentWatcher Watcher { get; }
+
+    /// <summary>节点被要求广播唤醒包的 MAC 地址（不真的发包）。</summary>
+    public ConcurrentQueue<string> Woken { get; }
 
     public Task<int> RunTask { get; }
 
@@ -181,7 +190,21 @@ internal sealed class NodeHarness : IAsyncDisposable
         var events = new AgentEventQueue(NullLogger<AgentEventQueue>.Instance);
         var replies = new ReplyService(client, config, NullLogger<ReplyService>.Instance);
         var tracker = new PromptTracker(client, replies, events, config, NullLogger<PromptTracker>.Instance, initialPromptGrace: TimeSpan.FromMilliseconds(50));
-        var executor = new CommandExecutor(client, new PathPolicy(config.AllowedRoots), tracker, replies, config, NullLogger<CommandExecutor>.Instance);
+        var watcher = new AgentWatcher(client, replies, events, tracker, null, NullLogger.Instance, TimeSpan.FromMilliseconds(100));
+        var attachments = new AttachmentDownloader(new HttpClient(factory.Server.CreateHandler()), factory.Server.BaseAddress, token, root.Combine("attachments"));
+        var woken = new ConcurrentQueue<string>();
+        var executor = new CommandExecutor(
+            client, new PathPolicy(config.AllowedRoots), tracker, replies, config, NullLogger<CommandExecutor>.Instance,
+            watcher, new GitInspector(new ProcessRunner(), "git", TimeSpan.FromSeconds(10)), attachments,
+            (macs, _) =>
+            {
+                foreach (var mac in macs)
+                {
+                    woken.Enqueue(mac);
+                }
+
+                return Task.FromResult(macs.Count);
+            });
         var connection = new ServerConnection(
             new Uri(factory.Server.BaseAddress, ProtocolInfo.NodeWebSocketPath),
             token,
@@ -190,7 +213,8 @@ internal sealed class NodeHarness : IAsyncDisposable
             events,
             executor.ExecuteAsync,
             NullLogger<ServerConnection>.Instance);
-        return new NodeHarness(herdr, config, connection, tracker, root);
+        watcher.Start();
+        return new NodeHarness(herdr, config, connection, tracker, watcher, woken, root);
     }
 
     /// <summary>在测试通道里发 /pair，从回复里取出配对码。</summary>
@@ -219,6 +243,7 @@ internal sealed class NodeHarness : IAsyncDisposable
         {
         }
 
+        await Watcher.DisposeAsync();
         await _tracker.DisposeAsync();
         _stop.Dispose();
         Root.Dispose();

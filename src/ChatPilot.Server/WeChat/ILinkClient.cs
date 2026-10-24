@@ -3,6 +3,8 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text.Json;
 using ChatPilot.Server.Options;
+using ChatPilot.Shared.Net;
+using ChatPilot.Shared.Protocol;
 using Microsoft.Extensions.Options;
 
 namespace ChatPilot.Server.WeChat;
@@ -18,6 +20,7 @@ public sealed class ILinkClient(HttpClient http, IOptions<ServerOptions> options
 {
     private static readonly TimeSpan QrPollTimeout = TimeSpan.FromSeconds(35);
     private static readonly TimeSpan ApiTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan MediaTimeout = TimeSpan.FromSeconds(60);
 
     private WeChatOptions WeChat => options.Value.WeChat;
 
@@ -96,6 +99,116 @@ public sealed class ILinkClient(HttpClient http, IOptions<ServerOptions> options
         {
             throw new ILinkException($"sendmessage 失败：ret={ret} {response.Errmsg}");
         }
+    }
+
+    /// <summary>
+    /// 下载并解密主人发来的图片原图：优先用服务端给的完整地址，否则用 CDN 地址拼下载参数；
+    /// 有密钥时按 AES-128-ECB（PKCS7）解密。做法和腾讯插件一致。
+    /// </summary>
+    /// <exception cref="ILinkException">缺少下载信息、地址不是微信的、下载失败、太大或解密失败。</exception>
+    public async Task<byte[]> DownloadImageAsync(ImageItem image, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        var uri = ImageUri(image.Media);
+        var key = ParseImageKey(image.Aeskey, image.Media?.AesKey);
+        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(MediaTimeout);
+        byte[] data;
+        try
+        {
+            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new ILinkException($"下载图片返回 HTTP {(int)response.StatusCode}");
+            }
+
+            // 加密后会多出最多 16 字节的填充。
+            data = await response.Content.ReadBoundedAsync(ProtocolInfo.MaxImageBytes + 16, deadline.Token).ConfigureAwait(false)
+                ?? throw new ILinkException($"图片太大了（上限 {ProtocolInfo.MaxImageBytes / 1024 / 1024} MB）");
+        }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new ILinkException("下载图片超时", new TimeoutException(ex.Message, ex));
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new ILinkException($"下载图片失败：{ex.Message}", ex);
+        }
+
+        if (key is null)
+        {
+            return data;
+        }
+
+        try
+        {
+            using var aes = Aes.Create();
+            aes.Key = key;
+            return aes.DecryptEcb(data, PaddingMode.PKCS7);
+        }
+        catch (CryptographicException ex)
+        {
+            throw new ILinkException("图片解密失败", ex);
+        }
+    }
+
+    /// <summary>
+    /// 图片的解密密钥：<c>aeskey</c>（十六进制）优先；否则 <c>media.aes_key</c> 的 base64，解出来是 16 字节就是密钥，
+    /// 是 32 位十六进制字符串就再按十六进制解。都没有时返回 null（不加密）。
+    /// </summary>
+    /// <exception cref="ILinkException">密钥格式不对。</exception>
+    internal static byte[]? ParseImageKey(string? hexKey, string? base64Key)
+    {
+        if (!string.IsNullOrEmpty(hexKey))
+        {
+            return hexKey.Length == 32 && hexKey.All(char.IsAsciiHexDigit)
+                ? Convert.FromHexString(hexKey)
+                : throw new ILinkException("图片密钥格式不对");
+        }
+
+        if (string.IsNullOrEmpty(base64Key))
+        {
+            return null;
+        }
+
+        byte[] decoded;
+        try
+        {
+            decoded = Convert.FromBase64String(base64Key);
+        }
+        catch (FormatException ex)
+        {
+            throw new ILinkException("图片密钥格式不对", ex);
+        }
+
+        if (decoded.Length == 16)
+        {
+            return decoded;
+        }
+
+        return decoded.Length == 32 && decoded.All(b => char.IsAsciiHexDigit((char)b))
+            ? Convert.FromHexString(System.Text.Encoding.ASCII.GetString(decoded))
+            : throw new ILinkException("图片密钥格式不对");
+    }
+
+    /// <summary>
+    /// 图片下载地址。服务端给的完整地址只接受 https 的微信域名（qq.com 或配置的 CDN），防止被诱导去访问别的地址。
+    /// </summary>
+    private Uri ImageUri(CdnMedia? media)
+    {
+        var cdn = new Uri(WeChat.CdnBaseUrl);
+        if (!string.IsNullOrEmpty(media?.FullUrl))
+        {
+            return Uri.TryCreate(media.FullUrl, UriKind.Absolute, out var full) && full.Scheme == "https"
+                && (full.Host == cdn.Host || full.Host.EndsWith(".qq.com", StringComparison.OrdinalIgnoreCase))
+                    ? full
+                    : throw new ILinkException("图片地址不是微信的地址");
+        }
+
+        return !string.IsNullOrEmpty(media?.EncryptQueryParam)
+            ? new Uri(WeChat.CdnBaseUrl.TrimEnd('/') + "/download?encrypted_query_param=" + Uri.EscapeDataString(media.EncryptQueryParam))
+            : throw new ILinkException("图片消息里没有下载信息");
     }
 
     /// <summary>iLink-App-ClientVersion：0x00MMNNPP，例如 2.4.10 → 0x0002040A。</summary>

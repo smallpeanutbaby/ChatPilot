@@ -92,7 +92,8 @@ public sealed class ServerConnection(
             ProtocolInfo.Version,
             typeof(ServerConnection).Assembly.GetName().Version?.ToString(3) ?? "0.0.0",
             TextChunker.Truncate($"{RuntimeInformation.OSDescription} {RuntimeInformation.OSArchitecture}", 100),
-            TextChunker.Truncate(Environment.MachineName, 64));
+            TextChunker.Truncate(Environment.MachineName, 64),
+            LocalNetwork.Describe());
         await WebSocketMessaging.SendAsync(socket, sendLock, hello, cancellationToken).ConfigureAwait(false);
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);

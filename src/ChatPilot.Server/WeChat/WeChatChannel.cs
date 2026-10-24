@@ -35,9 +35,12 @@ public sealed class WeChatChannel(
     private const int MaxConsecutiveFailures = 3;
     private const int InboxCapacity = 50;
 
-    /// <summary>待处理的主人消息；null 表示收到了不支持的消息类型（图片等）。</summary>
-    private readonly Channel<string?> _inbox = Channel.CreateBounded<string?>(
+    /// <summary>待处理的主人消息。</summary>
+    private readonly Channel<Inbound> _inbox = Channel.CreateBounded<Inbound>(
         new BoundedChannelOptions(InboxCapacity) { FullMode = BoundedChannelFullMode.Wait, SingleReader = true });
+
+    /// <summary>一条主人的消息：文字或图片；两个都是 null 表示收到了不支持的消息类型（文件、视频等）。</summary>
+    private sealed record Inbound(string? Text, ImageItem? Image);
 
     /// <inheritdoc />
     public string Name => "微信";
@@ -205,21 +208,34 @@ public sealed class WeChatChannel(
             });
         }
 
-        await _inbox.Writer.WriteAsync(ExtractText(message), stoppingToken).ConfigureAwait(false);
+        var image = ExtractImage(message);
+        var text = ExtractText(message);
+        if (image is not null)
+        {
+            await _inbox.Writer.WriteAsync(new Inbound(null, image), stoppingToken).ConfigureAwait(false);
+        }
+
+        if (text is not null || image is null)
+        {
+            await _inbox.Writer.WriteAsync(new Inbound(text, null), stoppingToken).ConfigureAwait(false);
+        }
     }
 
-    /// <summary>按收到的顺序逐条处理主人的消息并回复。</summary>
+    /// <summary>按收到的顺序逐条处理主人的消息并回复。图片也在这里下载，保证"先发图、再派活"的顺序。</summary>
     private async Task ProcessInboxAsync(CancellationToken stoppingToken)
     {
         try
         {
-            await foreach (var text in _inbox.Reader.ReadAllAsync(stoppingToken).ConfigureAwait(false))
+            await foreach (var item in _inbox.Reader.ReadAllAsync(stoppingToken).ConfigureAwait(false))
             {
                 try
                 {
-                    var reply = text is null
-                        ? "目前只支持文字消息（语音会自动转成文字）。发 /help 查看用法"
-                        : await dispatcher.HandleAsync(text, stoppingToken).ConfigureAwait(false);
+                    var reply = item switch
+                    {
+                        { Image: { } image } => await AcceptImageAsync(image, stoppingToken).ConfigureAwait(false),
+                        { Text: { } text } => await dispatcher.HandleAsync(text, stoppingToken).ConfigureAwait(false),
+                        _ => "目前只支持文字和图片消息（语音会自动转成文字）。发 /help 查看用法",
+                    };
                     await SendToOwnerAsync(reply, stoppingToken).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -233,6 +249,26 @@ public sealed class WeChatChannel(
             // 服务器正在关闭。
         }
     }
+
+    private async Task<string> AcceptImageAsync(ImageItem image, CancellationToken stoppingToken)
+    {
+        byte[] data;
+        try
+        {
+            data = await client.DownloadImageAsync(image, stoppingToken).ConfigureAwait(false);
+        }
+        catch (ILinkException ex)
+        {
+            logger.LogWarning("下载主人发来的图片失败：{Message}", ex.Message);
+            return "❌ 图片没收到（下载失败），请再发一次";
+        }
+
+        return await dispatcher.HandleImageAsync(data, stoppingToken).ConfigureAwait(false);
+    }
+
+    /// <summary>第一张图片。</summary>
+    internal static ImageItem? ExtractImage(WeixinMessage message) =>
+        message.ItemList?.FirstOrDefault(i => i.Type == ILinkConstants.ItemTypeImage && i.ImageItem?.Media is not null)?.ImageItem;
 
     /// <summary>取第一段文字；语音消息用微信自带的语音转文字结果。</summary>
     internal static string? ExtractText(WeixinMessage message)

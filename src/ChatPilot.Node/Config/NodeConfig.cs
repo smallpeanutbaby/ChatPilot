@@ -28,6 +28,9 @@ public sealed class NodeConfig
     /// <summary>herdr 的命名会话；为空时用默认会话。</summary>
     public string? HerdrSession { get; set; }
 
+    /// <summary>git 可执行文件（<c>/diff</c> 用）；开机自启时 PATH 很短，找不到时写绝对路径。</summary>
+    public string GitPath { get; set; } = "git";
+
     /// <summary><c>/new</c> 只允许在这些目录（含子目录）里打开工作区。</summary>
     public List<string> AllowedRoots { get; set; } = [];
 
@@ -89,6 +92,11 @@ public sealed class NodeConfig
         {
             // Windows 上启动 .cmd/.bat 会隐式经过 cmd.exe，参数按 cmd 规则解析，文字里的 & | % 可能被当成命令。
             errors.Add("HerdrPath 必须是可执行文件，不能是 .cmd / .bat / .ps1 脚本");
+        }
+
+        if (string.IsNullOrWhiteSpace(GitPath) || IsScriptWrapper(GitPath))
+        {
+            errors.Add("GitPath 必须是可执行文件，不能为空，也不能是 .cmd / .bat / .ps1 脚本");
         }
 
         if (HerdrSession is not null && !Validation.IsAgentName(HerdrSession))

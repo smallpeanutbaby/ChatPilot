@@ -118,6 +118,10 @@ public sealed class HerdrClient(IProcessRunner runner, string herdrPath, string?
     public Task CloseWorkspaceAsync(string workspaceId, CancellationToken cancellationToken) =>
         InvokeCommandAsync(["workspace", "close", workspaceId], defaultTimeout, cancellationToken);
 
+    /// <summary>关闭一个 pane（里面的 agent 进程随之结束）。</summary>
+    public Task ClosePaneAsync(string paneId, CancellationToken cancellationToken) =>
+        InvokeCommandAsync(["pane", "close", paneId], defaultTimeout, cancellationToken);
+
     /// <summary>用 herdr 内置方式启动 agent；成功时 agent 已经可以接收指令。</summary>
     /// <exception cref="HerdrException">启动时卡在确认框时 code 为 <c>agent_not_ready</c>（agent 已经在了）。</exception>
     public Task StartAgentAsync(string name, string kind, string paneId, TimeSpan timeout, CancellationToken cancellationToken) =>
