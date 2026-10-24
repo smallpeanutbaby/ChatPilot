@@ -22,6 +22,7 @@ namespace ChatPilot.Node.Execution;
 /// <param name="git">git 查询；为 null 时不支持 /diff。</param>
 /// <param name="attachments">图片下载；为 null 时不支持带图片的指令。</param>
 /// <param name="wakeSender">广播唤醒包，返回发出的包数；为 null 时用 <see cref="LocalNetwork.SendWakeAsync"/>（测试时替换掉，不真的发包）。</param>
+/// <param name="commandBudget">普通指令的总时间预算；为 null 时用 <see cref="CommandBudget"/>（测试时改短）。</param>
 public sealed class CommandExecutor(
     HerdrClient herdr,
     PathPolicy paths,
@@ -32,7 +33,8 @@ public sealed class CommandExecutor(
     AgentWatcher? watcher = null,
     GitInspector? git = null,
     AttachmentDownloader? attachments = null,
-    Func<IReadOnlyList<string>, CancellationToken, Task<int>>? wakeSender = null)
+    Func<IReadOnlyList<string>, CancellationToken, Task<int>>? wakeSender = null,
+    TimeSpan? commandBudget = null)
 {
     /// <summary><c>/read</c> 返回的文字上限，超出时保留结尾。</summary>
     private const int MaxReadChars = 12000;
@@ -46,18 +48,35 @@ public sealed class CommandExecutor(
     /// <summary>普通指令的总时间预算：服务器最多等 30 秒，节点要在那之前给出结果。</summary>
     internal static readonly TimeSpan CommandBudget = TimeSpan.FromSeconds(28);
 
+    /// <summary>
+    /// 带图片的指令里下载图片的时间预算（<see cref="ProtocolInfo.MediaDownloadSeconds"/>），在普通指令的预算之外另算：
+    /// 服务器等这类指令时也多等这么久。
+    /// </summary>
+    internal static readonly TimeSpan MediaDownloadBudget = TimeSpan.FromSeconds(ProtocolInfo.MediaDownloadSeconds);
+
     /// <summary>启动 agent 的总时间预算（服务器最多等 120 秒）。</summary>
     private TimeSpan StartBudget => TimeSpan.FromSeconds(config.AgentStartTimeoutSeconds + 20);
 
+    /// <summary>这个执行器用的普通指令预算：构造时传入的，或者默认的 <see cref="CommandBudget"/>。</summary>
+    private TimeSpan Budget => commandBudget ?? CommandBudget;
+
     /// <summary>执行一条指令。不会抛出异常（节点退出时的取消除外），所有失败都转成失败结果。</summary>
     /// <param name="command">服务器发来的指令。</param>
-    /// <param name="cancellationToken">节点退出或连接断开时取消；另外按指令类型限时（<see cref="CommandBudget"/> 或启动预算）。</param>
+    /// <param name="cancellationToken">
+    /// 节点退出或连接断开时取消；另外按指令类型限时（<see cref="CommandBudget"/>、启动预算，带图片时再加上 <see cref="MediaDownloadBudget"/>）。
+    /// 已经开始的 <c>herdr agent prompt</c> 不会因为取消或限时而中断。
+    /// </param>
     /// <returns>执行结果；超时、herdr 出错、参数不合法或内部错误都是失败结果。</returns>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> 被取消。</exception>
     public async Task<CommandOutcome> ExecuteAsync(NodeCommand command, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(command);
-        var budget = command is StartAgentCommand ? StartBudget : CommandBudget;
+        var budget = command switch
+        {
+            StartAgentCommand => StartBudget,
+            MediaPromptCommand => Budget + MediaDownloadBudget,
+            _ => Budget,
+        };
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(budget);
         var token = deadline.Token;
@@ -138,12 +157,16 @@ public sealed class CommandExecutor(
         return CommandOutcome.Success(new AgentListData(summaries, watcher?.WatchAll ?? false));
     }
 
-    /// <summary>派活（可以带图片）。图片先下载保存，路径附在文字后面；指令没交出去（比如排队满了）就把刚保存的图片删掉。</summary>
+    /// <summary>
+    /// 派活（可以带图片）。图片先下载保存（单独限时 <see cref="MediaDownloadBudget"/>），路径附在文字后面；
+    /// 下载完重新查一次 agent 再提交（下载可能花了不少时间，之前查到的状态已经过时）。
+    /// 指令没交出去（比如排队满了、下载期间它弹出了确认框）就把刚保存的图片删掉。
+    /// </summary>
     /// <param name="target">agent 名字或 pane ID。</param>
     /// <param name="text">要交给 agent 的文字。</param>
     /// <param name="media">附带的图片；不带图片的指令为 null。</param>
     /// <param name="cancellationToken">取消令牌。</param>
-    /// <returns>已发送或已排队的确认；参数不合法、没有 agent、在等确认（附屏幕摘要）或图片下载失败时为失败结果。</returns>
+    /// <returns>已发送或已排队的确认；参数不合法、没有 agent、在等确认（附屏幕摘要）、图片下载失败或超时时为失败结果。</returns>
     /// <exception cref="HerdrException">herdr 出错，由 <see cref="ExecuteAsync"/> 转成失败结果。</exception>
     private async Task<CommandOutcome> PromptAsync(string target, string text, IReadOnlyList<MediaRef>? media, CancellationToken cancellationToken)
     {
@@ -170,38 +193,75 @@ public sealed class CommandExecutor(
         }
 
         var agent = await herdr.GetAgentAsync(target, cancellationToken).ConfigureAwait(false);
+        if (await RefuseAsync(agent, cancellationToken).ConfigureAwait(false) is { } refused)
+        {
+            return refused;
+        }
+
+        if (media is null || attachments is null)
+        {
+            return await tracker.SubmitAsync(agent, text, cancellationToken).ConfigureAwait(false);
+        }
+
+        IReadOnlyList<string> saved;
+        try
+        {
+            using var download = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            download.CancelAfter(MediaDownloadBudget);
+            saved = await attachments.SaveAsync(media, agent.Cwd, download.Token).ConfigureAwait(false);
+        }
+        catch (AttachmentException ex)
+        {
+            return CommandOutcome.Failure(ErrorCodes.InvalidArgument, ex.Message);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return CommandOutcome.Failure(
+                ErrorCodes.InvalidArgument,
+                $"图片 {MediaDownloadBudget.TotalSeconds:0} 秒内没有下载完（服务器的上传速度可能太慢），这条指令没有发出");
+        }
+
+        CommandOutcome? outcome = null;
+        try
+        {
+            var latest = await herdr.GetAgentAsync(agent.PaneId, cancellationToken).ConfigureAwait(false);
+            if (latest.TerminalId != agent.TerminalId)
+            {
+                return CommandOutcome.Failure(ErrorCodes.NotFound, "下载图片的时候它已经不在了（pane 里换成了别的程序），这条指令没有发出");
+            }
+
+            outcome = await RefuseAsync(latest, cancellationToken).ConfigureAwait(false)
+                ?? await tracker.SubmitAsync(latest, AttachmentDownloader.AppendToPrompt(text, saved), cancellationToken).ConfigureAwait(false);
+            return outcome;
+        }
+        finally
+        {
+            // 没交出去就删掉刚存的图片。herdr 提交超时的话说不准文字有没有敲进去，图片留着。
+            if (outcome is not { Ok: true } && outcome?.Error?.Code != ErrorCodes.Timeout)
+            {
+                AttachmentDownloader.DeleteQuietly(saved);
+            }
+        }
+    }
+
+    /// <summary>agent 现在能不能接指令：pane 里没识别出 agent，或者在等确认（附屏幕摘要）时不能。</summary>
+    /// <param name="agent">刚查到的 agent。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>不能接时为失败结果；能接时为 null。</returns>
+    private async Task<CommandOutcome?> RefuseAsync(HerdrAgent agent, CancellationToken cancellationToken)
+    {
         if (agent.Kind is null)
         {
             return CommandOutcome.Failure(ErrorCodes.NotFound, "这个 pane 里没有识别出 agent");
         }
 
-        if (agent.Status == AgentStatus.Blocked)
+        if (agent.Status != AgentStatus.Blocked)
         {
-            var screen = await ShowDialogOrNoteAsync(agent, cancellationToken).ConfigureAwait(false);
-            return CommandOutcome.Failure(ErrorCodes.AgentBlocked, "它正在等你确认，先回复 /yes 或 /no：\n\n" + screen);
+            return null;
         }
 
-        IReadOnlyList<string> saved = [];
-        if (media is not null && attachments is not null)
-        {
-            try
-            {
-                saved = await attachments.SaveAsync(media, agent.Cwd, cancellationToken).ConfigureAwait(false);
-                text = AttachmentDownloader.AppendToPrompt(text, saved);
-            }
-            catch (AttachmentException ex)
-            {
-                return CommandOutcome.Failure(ErrorCodes.InvalidArgument, ex.Message);
-            }
-        }
-
-        var outcome = await tracker.SubmitAsync(agent, text, cancellationToken).ConfigureAwait(false);
-        if (!outcome.Ok)
-        {
-            AttachmentDownloader.DeleteQuietly(saved);
-        }
-
-        return outcome;
+        var screen = await ShowDialogOrNoteAsync(agent, cancellationToken).ConfigureAwait(false);
+        return CommandOutcome.Failure(ErrorCodes.AgentBlocked, "它正在等你确认，先回复 /yes 或 /no：\n\n" + screen);
     }
 
     /// <summary><c>/diff</c>：agent 工作目录里的 git 改动概要，或者一个文件的 diff。只读。</summary>

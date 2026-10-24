@@ -170,6 +170,27 @@ public sealed class NewFeatureTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Image_prompts_wait_longer_than_ordinary_commands()
+    {
+        // 审查：节点下载图片另有时限，服务器等带图片的指令也要多等这么久，不能按普通指令的时限报"没有响应"、留着图片让主人重发。
+        await using var factory = new ChatPilotFactory();
+        factory.Settings["ChatPilot:CommandTimeoutSeconds"] = "5";
+        using var chat = factory.CreateDevClient();
+        var herdr = new FakeHerdr();
+        var agent = herdr.AddAgent("tideq", "TideQ");
+        await using var node = await NodeHarness.PairAndStartAsync(factory, "mac", herdr);
+        agent.Cwd = node.Root.CreateDirectory("proj");
+        await SendImageAsync(Png, chat);
+
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        herdr.PromptGate = gate;
+        var reply = DevChat.SendAsync(chat, "@tideq 看看这个报错");
+        await Task.Delay(TimeSpan.FromSeconds(6));
+        gate.SetResult();
+        Assert.Equal("📨 已发给 [mac] tideq（带 1 张图片），做完会通知你", await reply);
+    }
+
+    [Fact]
     public async Task Close_confirmation_without_a_fresh_preview_only_previews()
     {
         var herdr = new FakeHerdr();
@@ -347,11 +368,11 @@ public sealed class NewFeatureTests : IAsyncLifetime
             state.Devices[index] = state.Devices[index] with { Networks = networks };
         });
 
-    private async Task<string> SendImageAsync(byte[] data)
+    private async Task<string> SendImageAsync(byte[] data, HttpClient? chat = null)
     {
         using var content = new ByteArrayContent(data);
         content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-        using var response = await _chat.PostAsync("/dev/image", content);
+        using var response = await (chat ?? _chat).PostAsync("/dev/image", content);
         response.EnsureSuccessStatusCode();
         var body = await System.Net.Http.Json.HttpContentJsonExtensions.ReadFromJsonAsync<DevChatResponse>(response.Content, ProtocolJson.Options);
         return string.Join("\n", body?.Replies ?? []);

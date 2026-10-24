@@ -655,6 +655,8 @@ public sealed class ChatDispatcher(
 
     /// <summary>
     /// 把文字（和暂存的图片）发给 agent。有图片时用 <see cref="MediaPromptCommand"/>：旧节点不认识它会回"不支持"，图片留着不丢。
+    /// 带图片时节点要先下载图片，多等 <see cref="ProtocolInfo.MediaDownloadSeconds"/> 秒；还是等不到结果时说不准它收到没有，
+    /// 丢掉暂存的图片，免得主人重发时图片被自动带上、同一件事带着图片又做一遍。
     /// 节点直接交出去时用固定说法回复，排队等其他情况转述节点的说明。
     /// </summary>
     /// <param name="device">设备。</param>
@@ -666,15 +668,25 @@ public sealed class ChatDispatcher(
     /// <param name="notFound">找不到目标时的回复；为 null 时用节点的说明。</param>
     /// <param name="observe">拿到节点的结果后调用，让调用方据此更新对话上下文；为 null 时不调用。</param>
     /// <param name="cancellationToken">取消令牌。</param>
-    /// <returns>回复主人的文字：已发出、节点的说明（例如排队了），或失败原因（带图片时提醒图片还暂存着）。</returns>
+    /// <returns>
+    /// 回复主人的文字：已发出、节点的说明（例如排队了），或失败原因（带图片时提醒图片还暂存着；带图片又超时时说明结果不确定、图片已丢掉）。
+    /// </returns>
     private async Task<string> SendTextAsync(
         DeviceRecord device, string target, string text, bool withImages, string label, string sentPhrase, string? notFound,
         Action<CommandOutcome>? observe, CancellationToken cancellationToken)
     {
         var attachments = withImages ? media.Issue(device.Id) : null;
         NodeCommand command = attachments is null ? new PromptCommand(target, text) : new MediaPromptCommand(target, text, attachments);
-        var outcome = await hub.SendAsync(device.Id, command, CommandTimeout, cancellationToken).ConfigureAwait(false);
+        var timeout = attachments is null ? CommandTimeout : CommandTimeout + TimeSpan.FromSeconds(ProtocolInfo.MediaDownloadSeconds);
+        var outcome = await hub.SendAsync(device.Id, command, timeout, cancellationToken).ConfigureAwait(false);
         observe?.Invoke(outcome);
+        if (!outcome.Ok && attachments is not null && outcome.Error?.Code == ErrorCodes.Timeout)
+        {
+            media.ClearPending();
+            return $"❓ 不确定 {label} 收到没有（{outcome.Error.Message}）。它可能已经收到了这条指令和图片，"
+                + $"先用 /read {device.Name}/{target} 看看再决定要不要重发；暂存的图片已经丢掉，重发时请重新发图片";
+        }
+
         if (!outcome.Ok)
         {
             var failure = notFound is not null && outcome.Error?.Code == ErrorCodes.NotFound ? notFound : ReplyFormatter.Failure(outcome);

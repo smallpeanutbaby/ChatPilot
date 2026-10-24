@@ -206,6 +206,58 @@ public sealed class QueueAndWatchTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_slow_image_download_does_not_use_up_the_prompt_budget()
+    {
+        // 审查：下载图片和提交共用一个预算，服务器上传慢、图片又大时，提交就被掐断（文字可能已经敲进去了还报超时）。
+        var agent = _herdr.AddAgent("tideq", "TideQ");
+        agent.Cwd = _temp.CreateDirectory("proj");
+        var executor = MediaExecutor(new SlowMediaHandler(Png, () => Task.Delay(1500)), commandBudget: TimeSpan.FromSeconds(1));
+
+        var outcome = await executor.ExecuteAsync(new MediaPromptCommand(agent.PaneId, "看图", [PngRef]), CancellationToken.None);
+        Assert.Equal(AckData.Sent, Assert.IsType<AckData>(outcome.Data).Message);
+        Assert.Single(_herdr.CallsStartingWith("agent", "prompt"));
+    }
+
+    [Fact]
+    public async Task The_agent_is_checked_again_after_the_images_are_downloaded()
+    {
+        // 审查：下载期间它弹出了确认框，不能拿下载前查到的"空闲"去提交；没交出去的图片要删掉。
+        _herdr.Screen = SampleScreens.PermissionDialog;
+        var agent = _herdr.AddAgent("tideq", "TideQ");
+        agent.Cwd = _temp.CreateDirectory("proj");
+        var executor = MediaExecutor(new SlowMediaHandler(Png, () =>
+        {
+            agent.Status = "blocked";
+            return Task.CompletedTask;
+        }));
+
+        var outcome = await executor.ExecuteAsync(new MediaPromptCommand(agent.PaneId, "看图", [PngRef]), CancellationToken.None);
+        Assert.Equal(ErrorCodes.AgentBlocked, outcome.Error?.Code);
+        Assert.Empty(_herdr.CallsStartingWith("agent", "prompt"));
+        Assert.Empty(Directory.GetFiles(Path.Combine(agent.Cwd, ".chatpilot", "attachments")));
+    }
+
+    [Fact]
+    public async Task A_prompt_already_handed_to_herdr_is_not_aborted_when_the_command_runs_out_of_time()
+    {
+        // 审查：到时（或者连接断开）时 herdr agent prompt 可能已经把文字敲进去了，不能半路杀掉、当成没发出去，否则用户重发就做两遍。
+        var agent = _herdr.AddAgent("tideq", "TideQ");
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _herdr.PromptGate = gate;
+        using var deadline = new CancellationTokenSource();
+        var submit = _tracker.SubmitAsync(await _client.GetAgentAsync(agent.PaneId, CancellationToken.None), "一", deadline.Token);
+        await DevChat.EventuallyAsync(() => Task.FromResult(_herdr.CallsStartingWith("agent", "prompt").Count == 1), "应该开始提交");
+
+        await deadline.CancelAsync();
+        await Task.Delay(100);
+        _herdr.PromptGate = null;
+        gate.SetResult();
+        Assert.Equal(AckData.Sent, Assert.IsType<AckData>((await submit).Data).Message);
+        var done = await _events.WaitAsync();
+        Assert.Equal((AgentEventKind.Completed, "一"), (done.Kind, done.Prompt));
+    }
+
+    [Fact]
     public async Task Stop_presses_esc_only_while_working_and_clears_the_queue()
     {
         var agent = _herdr.AddAgent("tideq", "TideQ", "working");
@@ -373,10 +425,29 @@ public sealed class QueueAndWatchTests : IAsyncDisposable
         Assert.Equal(agent.PaneId, listed.Agents.Single().PaneId);
     }
 
+    private static readonly byte[] Png = [0x89, (byte)'P', (byte)'N', (byte)'G', 0x0D, 0x0A, 0x1A, 0x0A, 7, 7];
+
+    private static MediaRef PngRef => new("abc", Png.Length, Convert.ToHexStringLower(SHA256.HashData(Png)));
+
+    private CommandExecutor MediaExecutor(HttpMessageHandler handler, TimeSpan? commandBudget = null) =>
+        new(_client, new PathPolicy(_config.AllowedRoots), _tracker, _replies, _config, NullLogger<CommandExecutor>.Instance, _watcher,
+            attachments: new AttachmentDownloader(new HttpClient(handler), new Uri("https://example.com"), "tok", _temp.Combine("fallback")),
+            commandBudget: commandBudget);
+
     private sealed class FixedHandler(byte[] body) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
             Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(body) });
+    }
+
+    /// <summary>下载时先做一件事（等一会儿、或者改 agent 的状态）再返回图片。</summary>
+    private sealed class SlowMediaHandler(byte[] body, Func<Task> whileDownloading) : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            await whileDownloading();
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(body) };
+        }
     }
 }
 
@@ -504,6 +575,16 @@ public sealed class AttachmentDownloaderTests : IDisposable
         Assert.Contains("HTTP 404", ex.Message, StringComparison.Ordinal);
 
         await Assert.ThrowsAsync<AttachmentException>(() => downloader.SaveAsync([Ref(Png) with { Id = "../x" }], null, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Images_already_saved_are_removed_when_a_later_one_fails()
+    {
+        var downloader = new AttachmentDownloader(new HttpClient(new StubHandler(Png)), new Uri("https://example.com"), "tok", _temp.Combine("fallback"));
+        var project = _temp.CreateDirectory("proj");
+        var tampered = Ref(Png) with { Sha256 = new string('0', 64) };
+        await Assert.ThrowsAsync<AttachmentException>(() => downloader.SaveAsync([Ref(Png), tampered], project, CancellationToken.None));
+        Assert.Empty(Directory.GetFiles(Path.Combine(project, ".chatpilot", "attachments")));
     }
 
     private static MediaRef Ref(byte[] data) => new("abc123", data.Length, Convert.ToHexStringLower(SHA256.HashData(data)));

@@ -28,37 +28,51 @@ public sealed class AttachmentException(string message) : Exception(message);
 /// <param name="fallbackDirectory">工作目录写不进去时存图片的节点自己的目录。</param>
 public sealed class AttachmentDownloader(HttpClient http, Uri server, string token, string fallbackDirectory)
 {
-    /// <summary>下载并保存所有附件，返回每张图片的绝对路径（顺序和传入的一样）。</summary>
+    /// <summary>下载并保存所有附件，返回每张图片的绝对路径（顺序和传入的一样）。中途失败或取消时，已经保存的几张也删掉。</summary>
     /// <param name="attachments">附件。</param>
     /// <param name="agentDirectory">agent 的工作目录；为 null 或写不进去时存到节点自己的目录。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>每张图片的绝对路径；没有附件时为空列表。</returns>
     /// <exception cref="AttachmentException">任何一张下载或保存失败。</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> 被取消。</exception>
     public async Task<IReadOnlyList<string>> SaveAsync(IReadOnlyList<MediaRef> attachments, string? agentDirectory, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(attachments);
         var directory = PrepareDirectory(agentDirectory);
         var stamp = DateTimeOffset.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
         var saved = new List<string>();
-        for (var i = 0; i < attachments.Count; i++)
+        var complete = false;
+        try
         {
-            var data = await DownloadAsync(attachments[i], cancellationToken).ConfigureAwait(false);
-            var extension = ImageFormat.DetectExtension(data) ?? throw new AttachmentException("收到的附件不是图片");
-            var suffix = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(3));
-            var path = Path.Combine(directory, $"{stamp}-{i + 1}-{suffix}.{extension}");
-            try
+            for (var i = 0; i < attachments.Count; i++)
             {
-                await File.WriteAllBytesAsync(path, data, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                throw new AttachmentException($"图片保存失败：{ex.Message}");
+                var data = await DownloadAsync(attachments[i], cancellationToken).ConfigureAwait(false);
+                var extension = ImageFormat.DetectExtension(data) ?? throw new AttachmentException("收到的附件不是图片");
+                var suffix = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(3));
+                var path = Path.Combine(directory, $"{stamp}-{i + 1}-{suffix}.{extension}");
+
+                // 先记下再写：写到一半失败的文件也要删掉。
+                saved.Add(path);
+                try
+                {
+                    await File.WriteAllBytesAsync(path, data, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    throw new AttachmentException($"图片保存失败：{ex.Message}");
+                }
             }
 
-            saved.Add(path);
+            complete = true;
+            return saved;
         }
-
-        return saved;
+        finally
+        {
+            if (!complete)
+            {
+                DeleteQuietly(saved);
+            }
+        }
     }
 
     /// <summary>删掉已经保存的图片（指令没交出去时用）；删不掉也不报错。</summary>

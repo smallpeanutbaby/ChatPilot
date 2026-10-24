@@ -157,8 +157,12 @@ public sealed class PromptTracker : IAsyncDisposable
     /// </summary>
     /// <param name="agent">提交前的 agent 状态，用它的状态序号判断之后有没有开始干活。</param>
     /// <param name="text">要交给 agent 的文字。</param>
-    /// <param name="cancellationToken">只用于提交这一步；后台跟踪不受它影响。</param>
+    /// <param name="cancellationToken">
+    /// 只用于提交这一步：开始提交前已经取消就不提交；已经开始的 <c>herdr agent prompt</c> 不会因为它中断（见 <see cref="SubmitNowAsync"/>）。
+    /// 后台跟踪不受它影响。
+    /// </param>
     /// <returns>成功时是给用户看的确认（已发送，或已排队、排第几）；排队已满或 herdr 提交失败时为失败结果。</returns>
+    /// <exception cref="OperationCanceledException">开始提交前 <paramref name="cancellationToken"/> 已经取消。</exception>
     public async Task<CommandOutcome> SubmitAsync(HerdrAgent agent, string text, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(agent);
@@ -281,16 +285,21 @@ public sealed class PromptTracker : IAsyncDisposable
         _reportedSeq.TryRemove(paneId, out _);
     }
 
-    /// <summary>立即提交文字，然后在后台等结果。</summary>
+    /// <summary>
+    /// 立即提交文字，然后在后台等结果。提交一旦开始就不因为 <paramref name="cancellationToken"/> 中断：
+    /// herdr 可能已经把文字敲进去了，半路结束它只会让结果变成"不知道发没发"，用户重发就会执行两次（herdr 调用本身有超时）。
+    /// </summary>
     /// <param name="agent">提交前的 agent 状态，用它的状态序号判断之后有没有开始干活。</param>
     /// <param name="text">要交给 agent 的文字。</param>
-    /// <param name="cancellationToken">只用于提交这一步。</param>
+    /// <param name="cancellationToken">开始提交前已经取消（指令到时了）就不提交；已经开始的提交不受它影响，只有节点退出才中断。</param>
     /// <returns>成功时是确认文字（跟踪名额满了会说明这次做完不通知）；herdr 提交失败时为对应的失败结果。</returns>
+    /// <exception cref="OperationCanceledException">开始提交前 <paramref name="cancellationToken"/> 已经取消，或者提交时节点正在退出。</exception>
     private async Task<CommandOutcome> SubmitNowAsync(HerdrAgent agent, string text, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         try
         {
-            await _herdr.PromptAsync(agent.PaneId, text, cancellationToken).ConfigureAwait(false);
+            await _herdr.PromptAsync(agent.PaneId, text, _stopping.Token).ConfigureAwait(false);
         }
         catch (HerdrException ex)
         {
