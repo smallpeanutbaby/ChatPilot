@@ -80,6 +80,53 @@ public sealed class QueueAndWatchTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_prompt_arriving_while_the_queue_pump_is_mid_submit_is_queued_not_typed_in_at_the_same_time()
+    {
+        // 审查：排队泵已经把一条取出来、还卡在 herdr agent prompt 上（还没开始跟踪）时直接发来的指令，不能同时敲进去。
+        var agent = _herdr.AddAgent("tideq", "TideQ", "working");
+        _herdr.PromptDelay = TimeSpan.FromMilliseconds(300);
+        Assert.Contains("已排队", Assert.IsType<AckData>((await _executor.ExecuteAsync(new PromptCommand(agent.PaneId, "一"), CancellationToken.None)).Data).Message, StringComparison.Ordinal);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _herdr.PromptGate = gate;
+        agent.Status = "idle";
+        await DevChat.EventuallyAsync(() => Task.FromResult(_herdr.CallsStartingWith("agent", "prompt").Count == 1), "排队泵应该开始提交第一条");
+        Assert.Equal(0, _tracker.QueuedCount(agent.PaneId));
+
+        var second = await _executor.ExecuteAsync(new PromptCommand(agent.PaneId, "二"), CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Contains("已排队（第 1 条）", Assert.IsType<AckData>(second.Data).Message, StringComparison.Ordinal);
+        Assert.Single(_herdr.CallsStartingWith("agent", "prompt"));
+
+        _herdr.PromptGate = null;
+        gate.SetResult();
+        var done1 = await _events.WaitAsync();
+        Assert.Equal((AgentEventKind.Completed, "一"), (done1.Kind, done1.Prompt));
+        var done2 = await _events.WaitAsync();
+        Assert.Equal((AgentEventKind.Completed, "二"), (done2.Kind, done2.Prompt));
+        Assert.Equal(["一", "二"], _herdr.CallsStartingWith("agent", "prompt").Select(c => c[3]));
+    }
+
+    [Fact]
+    public async Task Two_prompts_arriving_together_are_sent_one_after_the_other()
+    {
+        var agent = _herdr.AddAgent("tideq", "TideQ");
+        _herdr.PromptDelay = TimeSpan.FromMilliseconds(300);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _herdr.PromptGate = gate;
+        var first = _executor.ExecuteAsync(new PromptCommand(agent.PaneId, "一"), CancellationToken.None);
+        await DevChat.EventuallyAsync(() => Task.FromResult(_herdr.CallsStartingWith("agent", "prompt").Count == 1), "第一条应该开始提交");
+
+        var second = await _executor.ExecuteAsync(new PromptCommand(agent.PaneId, "二"), CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Contains("已排队（第 1 条）", Assert.IsType<AckData>(second.Data).Message, StringComparison.Ordinal);
+
+        _herdr.PromptGate = null;
+        gate.SetResult();
+        Assert.Equal(AckData.Sent, Assert.IsType<AckData>((await first).Data).Message);
+        Assert.Equal("一", (await _events.WaitAsync()).Prompt);
+        Assert.Equal("二", (await _events.WaitAsync()).Prompt);
+        Assert.Equal(["一", "二"], _herdr.CallsStartingWith("agent", "prompt").Select(c => c[3]));
+    }
+
+    [Fact]
     public async Task Queue_survives_a_node_restart()
     {
         var agent = _herdr.AddAgent("tideq", "TideQ", "working");

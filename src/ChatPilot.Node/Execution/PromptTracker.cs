@@ -23,8 +23,8 @@ public interface IAgentEventSink
 /// <item>每个 agent 同时最多一个后台跟踪任务（按 pane ID 去重），总数不超过 <see cref="MaxWatchers"/>，防止后台 herdr 进程无限堆积。</item>
 /// <item>任务一旦停下就一定会上报一个事件：整理回复失败时也会上报，内容改为提示用 /read 查看。</item>
 /// <item>跟踪中的任务记在 <see cref="TrackedTasks"/> 里，结果发给服务器之后才删；节点重启后用 <see cref="ResumeTrackedTasks"/> 接着跟踪。</item>
-/// <item>agent 正在干活（或者已经有任务在跟踪）时发来的指令进 <see cref="PromptQueue"/> 排队，
-/// 由每个 pane 一个的后台泵在它空闲、没有别的跟踪时逐条发出，不会把文字敲进正在干活的终端。</item>
+/// <item>agent 正在干活（或者已经有任务在跟踪、正有一条指令在提交）时发来的指令进 <see cref="PromptQueue"/> 排队，
+/// 由每个 pane 一个的后台泵在它空闲、没有别的跟踪时逐条发出，不会把文字敲进正在干活的终端，也不会两条同时敲进去。</item>
 /// </list>
 /// </remarks>
 public sealed class PromptTracker : IAsyncDisposable
@@ -88,6 +88,15 @@ public sealed class PromptTracker : IAsyncDisposable
     /// <summary>正在运行排队泵的 pane。</summary>
     private readonly ConcurrentDictionary<string, byte> _pumping = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// 保护"排队还是立即发"的决定：检查这个 pane 忙不忙、排队或者占用 <see cref="_submitting"/> 必须一起完成，
+    /// 否则两条指令（直接发来的和排队泵发出的，或者两条同时直接发来的）会同时敲进同一个终端。
+    /// </summary>
+    private readonly Lock _submitGate = new();
+
+    /// <summary>已经决定立即提交、还没交给后台跟踪的 pane（由 <see cref="_submitGate"/> 保护）；这期间发来的指令一律排队。</summary>
+    private readonly HashSet<string> _submitting = new(StringComparer.Ordinal);
+
     /// <summary>每个 pane 最近一次上报时的状态序号：盯梢（<see cref="AgentWatcher"/>）看到同一个状态就不再重复通知。</summary>
     private readonly ConcurrentDictionary<string, long> _reportedSeq = new(StringComparer.Ordinal);
 
@@ -139,7 +148,7 @@ public sealed class PromptTracker : IAsyncDisposable
     private TimeSpan WaitLimit => TimeSpan.FromHours(_config.PromptWaitHours);
 
     /// <summary>
-    /// 交给 agent 一条指令。它正在干活、已经有任务在跟踪、或者前面还有排队的指令时，先排队，等轮到了再发；
+    /// 交给 agent 一条指令。它正在干活、已经有任务在跟踪、正有另一条指令在提交、或者前面还有排队的指令时，先排队，等轮到了再发；
     /// 否则立即提交，然后在后台等结果。提交失败时直接返回失败结果。
     /// </summary>
     /// <param name="agent">提交前的 agent 状态，用它的状态序号判断之后有没有开始干活。</param>
@@ -149,9 +158,24 @@ public sealed class PromptTracker : IAsyncDisposable
     public async Task<CommandOutcome> SubmitAsync(HerdrAgent agent, string text, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(agent);
-        if (agent.Status == AgentStatus.Working || _watched.ContainsKey(agent.PaneId) || _queue.Count(agent.PaneId) > 0)
+        bool queued;
+        int? position = null;
+        lock (_submitGate)
         {
-            if (_queue.Enqueue(agent, text, DateTimeOffset.UtcNow) is not { } position)
+            queued = agent.Status == AgentStatus.Working || IsBusyLocked(agent.PaneId) || _queue.Count(agent.PaneId) > 0;
+            if (queued)
+            {
+                position = _queue.Enqueue(agent, text, DateTimeOffset.UtcNow);
+            }
+            else
+            {
+                _submitting.Add(agent.PaneId);
+            }
+        }
+
+        if (queued)
+        {
+            if (position is null)
             {
                 return CommandOutcome.Failure(ErrorCodes.Busy, $"排队的指令太多了（每个 agent 最多 {PromptQueue.MaxPerAgent} 条），等它做完一些再发，或者用 /stop 清空");
             }
@@ -160,7 +184,40 @@ public sealed class PromptTracker : IAsyncDisposable
             return CommandOutcome.Success(new AckData($"它正在忙，已排队（第 {position} 条），轮到时自动发出"));
         }
 
-        return await SubmitNowAsync(agent, text, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await SubmitNowAsync(agent, text, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            EndSubmit(agent.PaneId);
+        }
+    }
+
+    /// <summary>这个 pane 忙不忙：正在后台跟踪，或者有一条指令正在提交。</summary>
+    /// <param name="paneId">agent 所在 pane。</param>
+    /// <returns>忙为 true，这时新来的指令要排队。</returns>
+    private bool IsBusy(string paneId)
+    {
+        lock (_submitGate)
+        {
+            return IsBusyLocked(paneId);
+        }
+    }
+
+    /// <summary>同 <see cref="IsBusy"/>，调用方必须已经持有 <see cref="_submitGate"/>。</summary>
+    /// <param name="paneId">agent 所在 pane。</param>
+    /// <returns>忙为 true。</returns>
+    private bool IsBusyLocked(string paneId) => _watched.ContainsKey(paneId) || _submitting.Contains(paneId);
+
+    /// <summary>提交结束（已经交给后台跟踪，或者失败了），放开这个 pane。</summary>
+    /// <param name="paneId">agent 所在 pane。</param>
+    private void EndSubmit(string paneId)
+    {
+        lock (_submitGate)
+        {
+            _submitting.Remove(paneId);
+        }
     }
 
     /// <summary>排队等着发给这个 pane 的指令数。</summary>
@@ -173,10 +230,10 @@ public sealed class PromptTracker : IAsyncDisposable
     /// <returns>开始跟踪的时间；没有在跟踪的任务时为 null。</returns>
     public DateTimeOffset? TaskSince(string paneId) => _tasks.Find(paneId)?.Since;
 
-    /// <summary>这个 pane 是否正被后台跟踪（做完会由跟踪方上报）。</summary>
+    /// <summary>这个 pane 是否正被后台跟踪或者正在提交指令（做完会由跟踪方上报）。</summary>
     /// <param name="paneId">agent 所在 pane。</param>
-    /// <returns>正在跟踪为 true。</returns>
-    internal bool IsTracking(string paneId) => _watched.ContainsKey(paneId);
+    /// <returns>正在跟踪或提交为 true。</returns>
+    internal bool IsTracking(string paneId) => IsBusy(paneId);
 
     /// <summary>这个 pane 最近一次上报结果时的状态序号；没上报过为 null。</summary>
     /// <param name="paneId">agent 所在 pane。</param>
@@ -814,9 +871,9 @@ public sealed class PromptTracker : IAsyncDisposable
                 continue;
             }
 
-            if (_watched.ContainsKey(paneId))
+            if (IsBusy(paneId))
             {
-                // 上一条还在跟踪，做完会上报；等它结束。
+                // 上一条还在跟踪（做完会上报）或者正在提交；等它结束。
                 await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
                 continue;
             }
@@ -870,7 +927,7 @@ public sealed class PromptTracker : IAsyncDisposable
 
             // 刚空闲时界面可能还没准备好（会吞输入）；等一会儿再确认一次，期间可能又有人给它派了活。
             await Task.Delay(_initialPromptGrace, cancellationToken).ConfigureAwait(false);
-            if (_watched.ContainsKey(paneId))
+            if (IsBusy(paneId))
             {
                 continue;
             }
@@ -885,21 +942,49 @@ public sealed class PromptTracker : IAsyncDisposable
                 continue;
             }
 
-            if (latest is not { IsReady: true } || !_queue.Remove(next.Id))
+            if (latest is not { IsReady: true } || !TryBeginQueuedSubmit(paneId, next))
             {
                 continue;
             }
 
-            var outcome = await SubmitNowAsync(latest, next.Text, cancellationToken).ConfigureAwait(false);
-            if (!outcome.Ok)
+            try
             {
-                Publish(AgentEventKind.Failed, latest, $"排队的指令没有发出（{outcome.Error?.Message}）：{Summarize(next.Text)}", next);
+                var outcome = await SubmitNowAsync(latest, next.Text, cancellationToken).ConfigureAwait(false);
+                if (!outcome.Ok)
+                {
+                    Publish(AgentEventKind.Failed, latest, $"排队的指令没有发出（{outcome.Error?.Message}）：{Summarize(next.Text)}", next);
+                }
+                else if (!_watched.ContainsKey(paneId))
+                {
+                    // 同时跟踪的任务满了，这一条没人跟踪：至少等它开始干活再看下一条，不能把两条连着敲进去。
+                    await WaitForActivityAsync(latest, cancellationToken).ConfigureAwait(false);
+                }
             }
-            else if (!_watched.ContainsKey(paneId))
+            finally
             {
-                // 同时跟踪的任务满了，这一条没人跟踪：至少等它开始干活再看下一条，不能把两条连着敲进去。
-                await WaitForActivityAsync(latest, cancellationToken).ConfigureAwait(false);
+                EndSubmit(paneId);
             }
+        }
+    }
+
+    /// <summary>
+    /// 排队泵准备发出 <paramref name="next"/>：这个 pane 不忙、这一条还在队列里时，把它取出来并占住 pane，
+    /// 和 <see cref="SubmitAsync"/> 的判断互斥，提交期间直接发来的指令会排队。
+    /// </summary>
+    /// <param name="paneId">agent 所在 pane。</param>
+    /// <param name="next">排在最前面的指令。</param>
+    /// <returns>取出并占住了为 true，之后必须调用 <see cref="EndSubmit"/>；pane 忙或者这一条已经被清掉时为 false。</returns>
+    private bool TryBeginQueuedSubmit(string paneId, QueuedPrompt next)
+    {
+        lock (_submitGate)
+        {
+            if (IsBusyLocked(paneId) || !_queue.Remove(next.Id))
+            {
+                return false;
+            }
+
+            _submitting.Add(paneId);
+            return true;
         }
     }
 
